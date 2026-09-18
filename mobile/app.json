@@ -1,0 +1,45 @@
+﻿{
+  "expo": {
+    "name": "ChugLi",
+    "slug": "chugli",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "scheme": "chugli",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0A0A"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.chugli.mobile"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0A0A0A"
+      },
+      "package": "app.chugli.mobile",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "web": {},
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow ChugLi to use your location to find nearby clans."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "57d8f5b2-5a2e-4ec6-80e6-f9c609e08c07"
+      }
+    },
+    "owner": "sayan06"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "app": "npx --no-install tsx bin/chugli.ts",
+  "output": "cdk.out",
+  "versionReporting": false,
+  "context": {
+    "@aws-cdk/aws-lambda-nodejs:sdkV3ExcludeSmithyPackages": false
+  }
+}

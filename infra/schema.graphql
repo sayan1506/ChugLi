@@ -1,0 +1,18 @@
+type Session {
+  sessionId: ID!
+  expiresAt: AWSTimestamp!
+  serverNow: AWSTimestamp!
+}
+
+type Query {
+  placeholder: Boolean
+}
+
+type Mutation {
+  startSession: Session!
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+}

@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+cdk.out/
+dist/
+build/
+.expo/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage/
+
+# TypeScript
+*.tsbuildinfo
+
+# Mobile
+mobile/.expo/
+mobile/dist/
+
+# Docker
+Dockerfile
+docker-compose.yml
+
+# Response directory
+.response/

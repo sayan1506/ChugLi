@@ -1,0 +1,34 @@
+{
+  "name": "chugli",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "infra",
+    "mobile"
+  ],
+  "scripts": {
+    "install:all": "npm ci --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspaces",
+    "lint": "npm run lint --workspaces",
+    "infra:synth": "npm run synth --workspace=infra",
+    "infra:deploy": "npm run deploy --workspace=infra",
+    "mobile:start": "npm start --workspace=mobile",
+    "mobile:doctor": "npm run doctor --workspace=mobile",
+    "sync-config": "tsx sync-config.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.13",
+    "typescript": "~5.9.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "npm@10.9.3",
+  "overrides": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-screens": "4.16.0"
+  }
+}

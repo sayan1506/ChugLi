@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  verify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/infra/node_modules
+      - /app/mobile/node_modules
+    environment:
+      - NODE_ENV=test
+    command: ["sh", "-c", "npm run typecheck --workspaces && npm run test --workspaces && cd infra && npx cdk synth"]
