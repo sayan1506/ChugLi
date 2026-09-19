@@ -16,12 +16,29 @@ import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { join } from 'node:path';
 
 const SESSION_INACTIVITY_SECONDS = 86400;
-const CLAN_LIFETIME_SECONDS = 3600;
+const DEFAULT_CLAN_LIFETIME_SECONDS = 3600;
 const JOIN_RADIUS_METERS = 5000;
+
+function positiveInteger(value: unknown, fallback: number, name: string): number {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
 
 export class ChugLiStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
+
+    const clanLifetimeSeconds = positiveInteger(
+      this.node.tryGetContext('clanLifetimeSeconds'),
+      DEFAULT_CLAN_LIFETIME_SECONDS,
+      'clanLifetimeSeconds',
+    );
 
     const table = new Table(this, 'ChugLiTable', {
       partitionKey: { name: 'PK', type: AttributeType.STRING },
@@ -92,7 +109,7 @@ export class ChugLiStack extends Stack {
       environment: {
         CHUGLI_TABLE_NAME: table.tableName,
         SESSION_INACTIVITY_SECONDS: String(SESSION_INACTIVITY_SECONDS),
-        CLAN_LIFETIME_SECONDS: String(CLAN_LIFETIME_SECONDS),
+        CLAN_LIFETIME_SECONDS: String(clanLifetimeSeconds),
         JOIN_RADIUS_METERS: String(JOIN_RADIUS_METERS),
         APPSYNC_GRAPHQL_URL: api.graphqlUrl,
         APPSYNC_REGION: this.region,
@@ -201,5 +218,6 @@ $util.toJson(null)
     new CfnOutput(this, 'IdentityPoolId', { value: identityPool.ref });
     new CfnOutput(this, 'GuestRoleArn', { value: guestRole.roleArn });
     new CfnOutput(this, 'ApiId', { value: api.apiId });
+    new CfnOutput(this, 'ClanLifetimeSeconds', { value: String(clanLifetimeSeconds) });
   }
 }

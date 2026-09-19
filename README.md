@@ -4,9 +4,11 @@ ChugLi is an installable React Native + Expo mobile application backed by AWS Ap
 
 ## Current Implementation Status
 
-**Implementation is present through Phase 3.** Phase 1 guest-session fixes and the verified Phase 2 realtime clan-chat flow are retained. Phase 3 adds geohash-backed nearby discovery without adding another AWS service.
+**Source implementation is present through Phase 4.** Phase 1 guest-session fixes, the Phase 2 realtime clan-chat path, and Phase 3 geohash discovery are retained. Phase 4 adds the complete clan-expiry/mobile-lifecycle behavior required by the build roadmap.
 
-Implemented through Phase 3:
+Phase 4 packaging performed dependency-free source checks successfully, but this packaging environment could not complete `npm ci` because DNS resolution for `registry.npmjs.org` failed with `EAI_AGAIN`. Therefore the exact Phase 4 ZIP is **not** falsely marked as having rerun the full typecheck/test/lint/CDK-synth/Expo-Doctor suite. Run the commands below locally before deployment.
+
+Implemented through Phase 4:
 
 - React Native + Expo 54 + TypeScript + Expo Router
 - AWS CDK v2 backend in TypeScript
@@ -22,7 +24,13 @@ Implemented through Phase 3:
 - Opaque continuation tokens and client-side deduplication for paginated discovery
 - Public discovery results containing rounded distance but no stored clan coordinates
 - Join-by-ID and discovery-list joining with a fresh server-side 5 km check
-- One-hour server-generated clan lifetime
+- One-hour server-generated clan lifetime by default
+- Shared expiry inherited by clan membership, messages, and retry-deduplication records
+- Backend expiry checks independent of delayed DynamoDB TTL deletion
+- Server-time-based native expiry countdown using monotonic elapsed time instead of the device wall clock
+- Expired-clan screen that clears transient message state and stops realtime activity
+- Cold-start clan validation before restoring realtime
+- Foreground-resume credential refresh, expiry revalidation, subscription restoration, and reconciliation
 - Temporary clan member IDs and aliases
 - Message send, recent history, single-message fetch, pagination, and retry deduplication
 - Basic create/send rate limits
@@ -30,7 +38,7 @@ Implemented through Phase 3:
 - Membership-authorized, clan-filtered `onClanEvent` subscription
 - Foreground reconciliation after subscription, reconnect, app resume, and every 30 seconds while active
 - Foreground location handling for discovery/create/join, including denied, unavailable, stale, last-known, and approximate-location states
-- No chat text persisted to SecureStore
+- No chat text persisted to SecureStore, AsyncStorage, or an offline database
 
 ## Repository Structure
 
@@ -42,8 +50,8 @@ ChugLi-main/
 │   ├── lambda/
 │   │   ├── start-session.ts    # Guest application-session resolver
 │   │   └── app.ts              # Clan/chat/discovery/subscription resolvers
-│   ├── lib/chugli-stack.ts     # AWS resources, IAM, resolvers
-│   ├── test/                   # Vitest resolver/discovery tests
+│   ├── lib/chugli-stack.ts     # AWS resources, IAM, resolvers, lifetime config
+│   ├── test/                   # Vitest resolver/discovery/expiry tests
 │   └── schema.graphql          # AppSync schema
 ├── mobile/
 │   ├── app/                    # Expo Router screens
@@ -51,11 +59,11 @@ ChugLi-main/
 │       ├── auth/               # Cognito guest credentials
 │       ├── aws/                # SigV4 HTTP + AppSync realtime client
 │       ├── chat/               # Chat GraphQL documents/types
-│       ├── clan/               # Clan/discovery GraphQL documents/types
+│       ├── clan/               # Clan operations/types + expiry clock helpers
 │       ├── discovery/          # Nearby-page merge/format helpers
-│       ├── hooks/              # Session + live chat hooks
+│       ├── hooks/              # Session + live chat/lifecycle hooks
 │       ├── location/           # Foreground coordinate acquisition
-│       └── session/            # SecureStore session metadata
+│       └── session/            # SecureStore session metadata only
 ├── sync-config.ts              # CloudFormation outputs -> mobile/.env
 ├── Dockerfile
 ├── docker-compose.yml
@@ -81,6 +89,8 @@ npm run typecheck
 npm run test
 npm run lint
 npm run infra:synth
+cd mobile
+npx expo-doctor
 ```
 
 Or run the clean-container verification path:
@@ -89,9 +99,13 @@ Or run the clean-container verification path:
 docker compose run --rm verify
 ```
 
+Do not mark Phase 4 fully complete until these checks pass for this exact revision and the live expiry scenarios below are verified on Android.
+
 ## Deploy Backend
 
-The existing `ChugLi` stack is updated in place; Phase 3 does not create another stack or add Amazon Location Service.
+The existing `ChugLi` stack is updated in place; Phase 4 does not add another AWS service.
+
+Normal one-hour deployment:
 
 ```bash
 cd infra
@@ -110,26 +124,43 @@ Only public identifiers are written to `mobile/.env`:
 
 Never commit `.env`, credentials, signing keys, or long-lived AWS keys.
 
+## Accelerated Phase 4 Expiry Test
+
+The normal clan lifetime remains **3600 seconds**. For a clearly labelled live acceptance test, deploy the same stack with an explicit CDK context override, for example 120 seconds:
+
+```bash
+cd infra
+npx cdk deploy \
+  -c clanLifetimeSeconds=120 \
+  --profile chugli \
+  --region us-east-1 \
+  --require-approval never
+cd ..
+npm run sync-config -- --profile chugli --region us-east-1
+```
+
+After the short-lifetime test, redeploy **without** `-c clanLifetimeSeconds=...` to restore the normal 3600-second configuration.
+
 ## Run the Mobile App
 
 ```bash
 npm run mobile:start
 ```
 
-Phase 3 phone flow:
+Phase 4 phone flow:
 
 1. Start or restore the guest session.
-2. On Home, tap **Find** under **Nearby clans** and grant foreground location when requested.
-3. Confirm active clans within 5 km are shown with rounded distance and no exact coordinates.
-4. Create a clan on one client, then refresh discovery from another client near the creator.
-5. Verify a nearby clan still appears when the two positions fall on opposite sides of a geohash-cell boundary.
-6. Verify a clan just outside 5 km is not returned.
-7. Tap **Join** on a discovered clan. The phone obtains a fresh location and the backend rechecks the base-table clan state and exact distance before creating membership.
-8. Use **Load more nearby clans** when a continuation token is returned; accumulated results are deduplicated by clan ID.
+2. Create or join a clan and open chat.
+3. Confirm the header countdown is based on backend `serverNow` / `expiresAt` and decreases normally.
+4. With the accelerated test stack, keep the app open until expiry. The chat must close, transient messages must be cleared, and realtime must stop.
+5. Create another short-lived clan, background the app until after expiry, then resume it. The app must revalidate with AWS and stay on the expired state rather than restoring chat.
+6. Repeat after force-closing the app and reopening the same clan route. Cold start must verify server expiry before showing content or starting realtime.
+7. Change the Android wall clock while testing. Device-clock manipulation must not restore backend access; the active countdown uses server time plus monotonic elapsed time and resume/cold-start always recheck the backend.
+8. Confirm expired DynamoDB rows may still physically exist while AppSync reads/writes/subscription registration reject access.
 
-## Phase 3 API
+## Phase 4 API
 
-Client-accessible fields:
+Client-accessible fields remain:
 
 - `Mutation.startSession`
 - `Mutation.createClan`
@@ -147,6 +178,22 @@ Backend-only field:
 
 The guest IAM role has no direct DynamoDB access and cannot call `publishClanEvent`.
 
+## Expiry and Lifecycle Design
+
+At clan creation the backend calculates:
+
+```text
+expiresAt = serverNow + clanLifetimeSeconds
+```
+
+The default `clanLifetimeSeconds` is 3600. Creator membership, joined memberships, chat messages, and send request-deduplication rows inherit the clan's exact `expiresAt` value.
+
+Functional access never depends on DynamoDB TTL physically deleting an item. `getClan`, `listMessages`, `getMessage`, `sendMessage`, joining, and subscription registration all require an active clan at server time. Discovery also excludes expired index entries. DynamoDB TTL remains background cleanup only.
+
+On mobile, `serverNow` establishes a server-time anchor. The countdown advances using monotonic elapsed time instead of trusting the device wall clock. At local countdown expiry, the hook clears in-memory chat state, stops the subscription, disables sending, and renders the expired-clan state. Foreground resume and cold start still perform fresh server reads so a suspended JavaScript timer is never treated as authoritative.
+
+Returning from background clears the in-memory temporary-credential cache. The first signed HTTP reconciliation obtains current Cognito credentials, verifies clan state, then realtime is restored only if the clan is still active. The existing realtime client also obtains credentials again when reconnecting a lost socket.
+
 ## Nearby Discovery Design
 
 Clan creation stores a five-character geohash calculated by the backend:
@@ -156,18 +203,7 @@ geoPK = GEO#<geohash5>
 geoSK = expiresAt
 ```
 
-`nearbyClans`:
-
-1. validates the caller's active guest session and coordinates;
-2. calculates the 5 km latitude/longitude bounding box;
-3. enumerates every geohash-5 cell intersecting that box, including dateline and high-latitude wraparound cases;
-4. queries `GSI_GEO` with `geoPK = <cell>` and `geoSK > serverNow` using bounded query work;
-5. calculates exact Haversine distance for each candidate;
-6. removes expired/out-of-radius candidates and deduplicates by clan ID;
-7. returns public clan metadata plus rounded `distanceMeters`;
-8. returns an opaque continuation token when cell/index work remains.
-
-The discovery query does not authorize membership. A join always rereads the current clan item and performs a fresh exact-distance check, so stale discovery results cannot authorize entry.
+`nearbyClans` validates the caller/session and coordinates, enumerates intersecting cells, queries only index rows with `geoSK > serverNow`, applies exact Haversine filtering, removes expired/out-of-radius candidates, deduplicates by clan ID, and returns public metadata with rounded distance. Discovery never grants membership; joining rereads the current clan and performs a fresh server-side distance/expiry check.
 
 ## Data and Security Rules
 
@@ -177,12 +213,12 @@ The discovery query does not authorize membership. A join always rereads the cur
 - Clan centre coordinates remain private backend/index data and are not returned by `Clan` or `NearbyClan`.
 - The client never supplies a geohash; the backend calculates it from validated coordinates.
 - Joining performs a fresh server-side distance check against the stored clan centre.
-- Clan and clan-owned records use the same server-generated one-hour expiry.
+- Clan and clan-owned records use the same server-generated expiry.
 - Reads, sends, and subscription registration require active membership and an unexpired clan.
 - Message text is limited to 500 Unicode characters.
 - Send retries use `requestId` + payload hash so a retried committed request does not create another message.
 - Subscription events contain IDs/status/revision/expiry only; clients fetch authorized message content after an approved event.
-- Chat text is kept in React state/Apollo responses and is not stored in SecureStore.
+- Chat text remains transient React/Apollo state and is not stored in SecureStore, AsyncStorage, or an offline database.
 - Guest role has no DynamoDB, Bedrock, or internal publisher permissions.
 - Operational Lambda logging records operation/error type rather than message text or coordinates.
 
@@ -192,13 +228,16 @@ The discovery query does not authorize membership. A join always rereads the cur
 
 The mobile app:
 
-- establishes an IAM-authenticated AppSync WebSocket connection;
+- validates the clan before starting realtime on cold load;
+- establishes an IAM-authenticated AppSync WebSocket only for an active clan;
 - registers `onClanEvent(clanId)`;
 - fetches message content after an `APPROVED` event;
 - reconciles immediately after subscription readiness;
 - reconnects automatically after socket loss;
-- reconnects and reconciles when returning to the foreground;
-- reconciles every 30 seconds only while the app is active.
+- stops realtime while backgrounded;
+- refreshes temporary credentials, revalidates expiry, then restores realtime on foreground resume;
+- reconciles every 30 seconds only while the app is active;
+- stops realtime and clears transient chat state at expiry.
 
 ## EAS APK Build
 
@@ -209,23 +248,22 @@ cd mobile
 eas build --platform android --profile preview
 ```
 
-The final project submission still requires standalone APK verification in the later packaging phase. Development builds are sufficient for the Phase 3 discovery acceptance checks.
+The final project submission still requires standalone APK verification in Phase 7. Development builds are sufficient for the Phase 4 lifecycle acceptance checks.
 
 ## Intentionally Deferred
 
 The following remain later-phase work:
 
-- Full expiry/countdown lifecycle UX and cold-start expiry enforcement (Phase 4)
-- Reporting and AI moderation (Phase 5)
+- Reporting and Nova Lite moderation (Phase 5)
 - Personal mute (Phase 5)
-- Full leave/expired-clan product flow
+- Full leave/report/mute product flow and native polish (Phase 6)
 - Maps
 - Push notifications
 - Direct messages
 - Media uploads
 - iOS release/store submission
 
-See `.response/phase-3-report.md` for this handoff's implementation and verification status.
+See `.response/phase-4-report.md` for this handoff's implementation and verification status.
 
 ## License
 

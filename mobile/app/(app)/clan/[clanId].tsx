@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { formatClanCountdown } from '@/clan/expiry';
 import { useClanChat } from '@/hooks/useClanChat';
 import type { ChatMessage } from '@/chat/types';
 
@@ -36,6 +37,8 @@ export default function ClanChatScreen() {
     sending,
     error,
     realtimeState,
+    expired,
+    remainingSeconds,
     sendMessage,
     loadMore,
     retry,
@@ -87,6 +90,18 @@ export default function ClanChatScreen() {
     );
   }
 
+  if (expired) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.expiredTitle}>Clan expired</Text>
+        <Text style={styles.expiredText}>This clan has closed and its chat is no longer available.</Text>
+        <Pressable style={styles.button} onPress={() => router.replace('/home')}>
+          <Text style={styles.buttonText}>Back to nearby clans</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   if (!clan) {
     return (
       <View style={styles.centered}>
@@ -114,6 +129,7 @@ export default function ClanChatScreen() {
         <View style={styles.headerText}>
           <Text style={styles.title} numberOfLines={1}>{clan.title}</Text>
           <Text style={styles.meta}>{clan.category} · {realtimeLabel}</Text>
+          <Text style={styles.countdown}>Expires in {formatClanCountdown(remainingSeconds ?? 0)}</Text>
         </View>
       </View>
 
@@ -151,13 +167,13 @@ export default function ClanChatScreen() {
           placeholder="Message clan"
           maxLength={500}
           multiline
-          editable={!sending}
+          editable={!sending && !expired}
         />
         <Pressable
           accessibilityRole="button"
-          style={[styles.sendButton, (!draft.trim() || sending) ? styles.disabled : null]}
+          style={[styles.sendButton, (!draft.trim() || sending || expired) ? styles.disabled : null]}
           onPress={() => void handleSend()}
-          disabled={!draft.trim() || sending}
+          disabled={!draft.trim() || sending || expired}
         >
           {sending ? <ActivityIndicator color="#FFF" /> : <Text style={styles.sendText}>Send</Text>}
         </Pressable>
@@ -174,6 +190,7 @@ const styles = StyleSheet.create({
   headerText: { flex: 1 },
   title: { fontSize: 22, fontWeight: '800', color: '#111' },
   meta: { color: '#666', marginTop: 2 },
+  countdown: { color: '#333', marginTop: 3, fontWeight: '700' },
   idBox: { backgroundColor: '#FFF', marginHorizontal: 16, borderRadius: 14, padding: 12 },
   idLabel: { color: '#666', fontSize: 12 },
   idValue: { color: '#111', marginTop: 5, fontFamily: 'monospace', fontSize: 12 },
@@ -194,6 +211,8 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.45 },
   muted: { color: '#666', marginTop: 10 },
   errorText: { color: '#9F1D1D', textAlign: 'center' },
+  expiredTitle: { color: '#111', fontSize: 26, fontWeight: '800' },
+  expiredText: { color: '#666', textAlign: 'center', maxWidth: 320, lineHeight: 21 },
   button: { backgroundColor: '#111', minWidth: 120, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 18, alignItems: 'center' },
   buttonText: { color: '#FFF', fontWeight: '700' },
   secondaryButton: { borderWidth: 1, borderColor: '#111', minWidth: 120, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 18, alignItems: 'center' },
