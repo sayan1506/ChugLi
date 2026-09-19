@@ -15,6 +15,23 @@ export const CREATE_CLAN_MUTATION = gql`
   }
 `;
 
+export const NEARBY_CLANS_QUERY = gql`
+  query NearbyClans($lat: Float!, $lng: Float!, $nextToken: String) {
+    nearbyClans(lat: $lat, lng: $lng, nextToken: $nextToken) {
+      items {
+        clanId
+        title
+        category
+        createdAt
+        expiresAt
+        distanceMeters
+      }
+      nextToken
+      serverNow
+    }
+  }
+`;
+
 export const JOIN_CLAN_MUTATION = gql`
   mutation JoinClan($clanId: ID!, $lat: Float!, $lng: Float!) {
     joinClan(clanId: $clanId, lat: $lat, lng: $lng) {

@@ -1,22 +1,27 @@
 # ChugLi
 
-ChugLi is an installable React Native + Expo mobile application backed by AWS AppSync, Lambda, DynamoDB, and Cognito guest identities. Users enter without registration, create short-lived location-bound clans, join by clan ID when nearby, and exchange live text messages under temporary aliases.
+ChugLi is an installable React Native + Expo mobile application backed by AWS AppSync, Lambda, DynamoDB, and Cognito guest identities. Users enter without registration, discover short-lived clans near their current location, create or join a clan, and exchange live text messages under temporary aliases.
 
 ## Current Implementation Status
 
-**Phase 2 implementation is present in this repository.** Phase 1 guest-session fixes are retained. The final Phase 2 acceptance check still requires deployment plus two app instances (and a third non-member session) against the live AWS stack.
+**Implementation is present through Phase 3.** Phase 1 guest-session fixes and the verified Phase 2 realtime clan-chat flow are retained. Phase 3 adds geohash-backed nearby discovery without adding another AWS service.
 
-Implemented through Phase 2:
+Implemented through Phase 3:
 
 - React Native + Expo 54 + TypeScript + Expo Router
 - AWS CDK v2 backend in TypeScript
-- Single on-demand DynamoDB table with `PK`, `SK`, TTL `expiresAt`, and reserved sparse `GSI_GEO`
+- Single on-demand DynamoDB table with `PK`, `SK`, TTL `expiresAt`, and sparse `GSI_GEO`
 - AppSync GraphQL API with `AWS_IAM`
 - Cognito Identity Pool unauthenticated guest credentials
 - SigV4-signed HTTP GraphQL requests and IAM-authenticated AppSync WebSocket subscriptions
 - Rolling 24-hour guest application sessions
 - Clan creation with creator membership in one DynamoDB transaction
-- Join-by-ID with a fresh server-side 5 km Haversine check
+- Server-generated geohash-5 index keys for clan metadata
+- Nearby discovery over every geohash cell intersecting the 5 km search bounding box
+- Exact Haversine filtering after the geo-index query
+- Opaque continuation tokens and client-side deduplication for paginated discovery
+- Public discovery results containing rounded distance but no stored clan coordinates
+- Join-by-ID and discovery-list joining with a fresh server-side 5 km check
 - One-hour server-generated clan lifetime
 - Temporary clan member IDs and aliases
 - Message send, recent history, single-message fetch, pagination, and retry deduplication
@@ -24,7 +29,7 @@ Implemented through Phase 2:
 - Backend-only `publishClanEvent` mutation
 - Membership-authorized, clan-filtered `onClanEvent` subscription
 - Foreground reconciliation after subscription, reconnect, app resume, and every 30 seconds while active
-- Foreground device location for create/join
+- Foreground location handling for discovery/create/join, including denied, unavailable, stale, last-known, and approximate-location states
 - No chat text persisted to SecureStore
 
 ## Repository Structure
@@ -36,9 +41,9 @@ ChugLi-main/
 │   ├── bin/                    # CDK entry
 │   ├── lambda/
 │   │   ├── start-session.ts    # Guest application-session resolver
-│   │   └── app.ts              # Clan/chat/subscription authorization resolvers
+│   │   └── app.ts              # Clan/chat/discovery/subscription resolvers
 │   ├── lib/chugli-stack.ts     # AWS resources, IAM, resolvers
-│   ├── test/                   # Vitest resolver tests
+│   ├── test/                   # Vitest resolver/discovery tests
 │   └── schema.graphql          # AppSync schema
 ├── mobile/
 │   ├── app/                    # Expo Router screens
@@ -46,7 +51,8 @@ ChugLi-main/
 │       ├── auth/               # Cognito guest credentials
 │       ├── aws/                # SigV4 HTTP + AppSync realtime client
 │       ├── chat/               # Chat GraphQL documents/types
-│       ├── clan/               # Clan GraphQL documents/types
+│       ├── clan/               # Clan/discovery GraphQL documents/types
+│       ├── discovery/          # Nearby-page merge/format helpers
 │       ├── hooks/              # Session + live chat hooks
 │       ├── location/           # Foreground coordinate acquisition
 │       └── session/            # SecureStore session metadata
@@ -85,14 +91,14 @@ docker compose run --rm verify
 
 ## Deploy Backend
 
-The existing stack is updated in place; Phase 2 does not introduce another AWS stack.
+The existing `ChugLi` stack is updated in place; Phase 3 does not create another stack or add Amazon Location Service.
 
 ```bash
 cd infra
 npx cdk bootstrap --profile chugli --region us-east-1   # first deployment only
 npx cdk deploy --profile chugli --region us-east-1 --require-approval never
 cd ..
-npm run sync-config
+npm run sync-config -- --profile chugli --region us-east-1
 ```
 
 Only public identifiers are written to `mobile/.env`:
@@ -110,17 +116,18 @@ Never commit `.env`, credentials, signing keys, or long-lived AWS keys.
 npm run mobile:start
 ```
 
-The Phase 2 test flow is:
+Phase 3 phone flow:
 
-1. Start a guest session.
-2. Create a clan on client A using its foreground location.
-3. Share the displayed clan ID with client B.
-4. Join on client B while within 5 km of the creator's fixed clan centre.
-5. Exchange messages and verify they appear without manual refresh.
-6. Retry a send with the same request ID path and verify only one committed message exists.
-7. Use a third guest session that is not a member and verify clan content/subscription access is denied.
+1. Start or restore the guest session.
+2. On Home, tap **Find** under **Nearby clans** and grant foreground location when requested.
+3. Confirm active clans within 5 km are shown with rounded distance and no exact coordinates.
+4. Create a clan on one client, then refresh discovery from another client near the creator.
+5. Verify a nearby clan still appears when the two positions fall on opposite sides of a geohash-cell boundary.
+6. Verify a clan just outside 5 km is not returned.
+7. Tap **Join** on a discovered clan. The phone obtains a fresh location and the backend rechecks the base-table clan state and exact distance before creating membership.
+8. Use **Load more nearby clans** when a continuation token is returned; accumulated results are deduplicated by clan ID.
 
-## Phase 2 API
+## Phase 3 API
 
 Client-accessible fields:
 
@@ -128,6 +135,7 @@ Client-accessible fields:
 - `Mutation.createClan`
 - `Mutation.joinClan`
 - `Mutation.sendMessage`
+- `Query.nearbyClans`
 - `Query.getClan`
 - `Query.listMessages`
 - `Query.getMessage`
@@ -139,12 +147,35 @@ Backend-only field:
 
 The guest IAM role has no direct DynamoDB access and cannot call `publishClanEvent`.
 
+## Nearby Discovery Design
+
+Clan creation stores a five-character geohash calculated by the backend:
+
+```text
+geoPK = GEO#<geohash5>
+geoSK = expiresAt
+```
+
+`nearbyClans`:
+
+1. validates the caller's active guest session and coordinates;
+2. calculates the 5 km latitude/longitude bounding box;
+3. enumerates every geohash-5 cell intersecting that box, including dateline and high-latitude wraparound cases;
+4. queries `GSI_GEO` with `geoPK = <cell>` and `geoSK > serverNow` using bounded query work;
+5. calculates exact Haversine distance for each candidate;
+6. removes expired/out-of-radius candidates and deduplicates by clan ID;
+7. returns public clan metadata plus rounded `distanceMeters`;
+8. returns an opaque continuation token when cell/index work remains.
+
+The discovery query does not authorize membership. A join always rereads the current clan item and performs a fresh exact-distance check, so stale discovery results cannot authorize entry.
+
 ## Data and Security Rules
 
 - Caller identity comes from AppSync's verified IAM/Cognito context.
 - Application sessions use server-generated IDs and rolling 24-hour inactivity expiry.
 - Clan IDs, member IDs, aliases, message IDs, timestamps, and status are generated or validated server-side.
-- Clan centre coordinates remain backend data and are not returned by the public `Clan` GraphQL type.
+- Clan centre coordinates remain private backend/index data and are not returned by `Clan` or `NearbyClan`.
+- The client never supplies a geohash; the backend calculates it from validated coordinates.
 - Joining performs a fresh server-side distance check against the stored clan centre.
 - Clan and clan-owned records use the same server-generated one-hour expiry.
 - Reads, sends, and subscription registration require active membership and an unexpired clan.
@@ -178,17 +209,15 @@ cd mobile
 eas build --platform android --profile preview
 ```
 
-The final project submission still requires a standalone APK verification in the later packaging phase. Phase 2 may be tested with development builds.
+The final project submission still requires standalone APK verification in the later packaging phase. Development builds are sufficient for the Phase 3 discovery acceptance checks.
 
 ## Intentionally Deferred
 
-The following are not part of Phase 2 and should not be treated as implemented yet:
+The following remain later-phase work:
 
-- Nearby clan discovery and geohash-cell querying
-- Storing/querying clan geohashes for discovery
-- Full expiry/countdown lifecycle UX
-- Reporting and AI moderation
-- Personal mute
+- Full expiry/countdown lifecycle UX and cold-start expiry enforcement (Phase 4)
+- Reporting and AI moderation (Phase 5)
+- Personal mute (Phase 5)
 - Full leave/expired-clan product flow
 - Maps
 - Push notifications
@@ -196,7 +225,7 @@ The following are not part of Phase 2 and should not be treated as implemented y
 - Media uploads
 - iOS release/store submission
 
-See `.response/phase-2-report.md` for the implementation and verification status of this handoff.
+See `.response/phase-3-report.md` for this handoff's implementation and verification status.
 
 ## License
 

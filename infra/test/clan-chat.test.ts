@@ -116,6 +116,8 @@ describe('Phase 2 resolver', () => {
       category: 'Study',
       lat: 22.5726,
       lng: 88.3639,
+      geoPK: expect.stringMatching(/^GEO#[0-9bcdefghjkmnpqrstuvwxyz]{5}$/),
+      geoSK: result.expiresAt,
     });
     expect(input.TransactItems?.[1]?.Put?.Item).toMatchObject({
       SK: 'MEMBER#session-1',

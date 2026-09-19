@@ -22,6 +22,22 @@ type Clan {
   myAlias: String!
 }
 
+
+type NearbyClan {
+  clanId: ID!
+  title: String!
+  category: String!
+  createdAt: AWSTimestamp!
+  expiresAt: AWSTimestamp!
+  distanceMeters: Int!
+}
+
+type NearbyClanPage {
+  items: [NearbyClan!]!
+  nextToken: String
+  serverNow: AWSTimestamp!
+}
+
 type Message {
   messageId: ID!
   clanId: ID!
@@ -67,6 +83,7 @@ input ClanEventInput {
 }
 
 type Query {
+  nearbyClans(lat: Float!, lng: Float!, nextToken: String): NearbyClanPage!
   getClan(clanId: ID!): Clan!
   listMessages(clanId: ID!, nextToken: String): MessagePage!
   getMessage(clanId: ID!, messageId: ID!): Message!

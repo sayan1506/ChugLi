@@ -20,6 +20,8 @@ interface ClanItem {
   category: string;
   lat: number;
   lng: number;
+  geoPK?: string;
+  geoSK?: number;
   createdAt: number;
   expiresAt: number;
 }
@@ -69,12 +71,21 @@ interface ClanEvent {
 
 type ResolverEvent = AppSyncResolverEvent<Record<string, unknown>>;
 
-const TABLE_NAME = process.env.CHUGLI_TABLE_NAME ?? '';
+function tableName(): string {
+  return process.env.CHUGLI_TABLE_NAME ?? '';
+}
 const SESSION_INACTIVITY_SECONDS = Number(process.env.SESSION_INACTIVITY_SECONDS ?? '86400');
 const CLAN_LIFETIME_SECONDS = Number(process.env.CLAN_LIFETIME_SECONDS ?? '3600');
 const JOIN_RADIUS_METERS = Number(process.env.JOIN_RADIUS_METERS ?? '5000');
 const MESSAGE_LIMIT = 500;
 const MESSAGE_PAGE_SIZE = 50;
+const GEO_INDEX_NAME = 'GSI_GEO';
+const GEOHASH_PRECISION = 5;
+const NEARBY_PAGE_SIZE = 50;
+const NEARBY_QUERY_PAGE_SIZE = 25;
+const NEARBY_MAX_QUERY_PAGES = 12;
+const EARTH_RADIUS_METERS = 6_371_000;
+const GEOHASH_ALPHABET = '0123456789bcdefghjkmnpqrstuvwxyz';
 const CREATE_CLAN_LIMIT = 3;
 const CREATE_CLAN_WINDOW_SECONDS = 3600;
 const SEND_LIMIT = 10;
@@ -140,7 +151,7 @@ async function requireSession(event: ResolverEvent, now: number): Promise<Caller
   try {
     const result = await doc.send(
       new UpdateCommand({
-        TableName: TABLE_NAME,
+        TableName: tableName(),
         Key: key,
         UpdateExpression: 'SET lastSeenAt = :now, expiresAt = :newExpiresAt',
         ConditionExpression: 'attribute_exists(PK) AND expiresAt > :now',
@@ -212,18 +223,147 @@ function createMessageId(): string {
   return `${String(Date.now()).padStart(13, '0')}-${randomUUID()}`;
 }
 
+function normalizeLongitude(lng: number): number {
+  let normalized = lng;
+  while (normalized < -180) normalized += 360;
+  while (normalized >= 180) normalized -= 360;
+  return normalized;
+}
+
+export function encodeGeohash(lat: number, lng: number, precision = GEOHASH_PRECISION): string {
+  let latMin = -90;
+  let latMax = 90;
+  let lngMin = -180;
+  let lngMax = 180;
+  let evenBit = true;
+  let bit = 0;
+  let value = 0;
+  let hash = '';
+  const normalizedLng = normalizeLongitude(lng);
+
+  while (hash.length < precision) {
+    if (evenBit) {
+      const mid = (lngMin + lngMax) / 2;
+      if (normalizedLng >= mid) {
+        value = (value << 1) | 1;
+        lngMin = mid;
+      } else {
+        value <<= 1;
+        lngMax = mid;
+      }
+    } else {
+      const mid = (latMin + latMax) / 2;
+      if (lat >= mid) {
+        value = (value << 1) | 1;
+        latMin = mid;
+      } else {
+        value <<= 1;
+        latMax = mid;
+      }
+    }
+    evenBit = !evenBit;
+    bit += 1;
+    if (bit === 5) {
+      hash += GEOHASH_ALPHABET[value] ?? '0';
+      bit = 0;
+      value = 0;
+    }
+  }
+
+  return hash;
+}
+
+function geohashGridDimensions(precision: number): { latBits: number; lngBits: number } {
+  const totalBits = precision * 5;
+  return {
+    lngBits: Math.ceil(totalBits / 2),
+    latBits: Math.floor(totalBits / 2),
+  };
+}
+
+function longitudeRangesForBoundingBox(centerLng: number, deltaLng: number): Array<[number, number]> {
+  if (deltaLng >= 180) {
+    return [[-180, 180]];
+  }
+  const min = centerLng - deltaLng;
+  const max = centerLng + deltaLng;
+  if (min < -180) {
+    return [[min + 360, 180], [-180, max]];
+  }
+  if (max > 180) {
+    return [[min, 180], [-180, max - 360]];
+  }
+  return [[min, max]];
+}
+
+export function geohashCellsForRadius(
+  lat: number,
+  lng: number,
+  radiusMeters = JOIN_RADIUS_METERS,
+  precision = GEOHASH_PRECISION,
+): string[] {
+  const angular = radiusMeters / EARTH_RADIUS_METERS;
+  const latDelta = (angular * 180) / Math.PI;
+  const minLat = Math.max(-90, lat - latDelta);
+  const maxLat = Math.min(90, lat + latDelta);
+  const cosLat = Math.cos(toRadians(lat));
+  const reachesPole = Math.abs(lat) + latDelta >= 90;
+  const longitudeRatio = Math.abs(cosLat) < 1e-12
+    ? 1
+    : Math.min(1, Math.sin(angular) / Math.abs(cosLat));
+  const lngDelta = reachesPole
+    ? 180
+    : (Math.asin(longitudeRatio) * 180) / Math.PI;
+  const longitudeRanges = longitudeRangesForBoundingBox(normalizeLongitude(lng), lngDelta);
+
+  const { latBits, lngBits } = geohashGridDimensions(precision);
+  const latCells = 2 ** latBits;
+  const lngCells = 2 ** lngBits;
+  const latStep = 180 / latCells;
+  const lngStep = 360 / lngCells;
+  const maxLatIndex = latCells - 1;
+  const maxLngIndex = lngCells - 1;
+
+  const latStart = Math.max(0, Math.min(maxLatIndex, Math.floor((minLat + 90) / latStep)));
+  const latEnd = Math.max(0, Math.min(maxLatIndex, Math.floor((Math.min(maxLat, 90 - Number.EPSILON) + 90) / latStep)));
+  const cellEntries = new Map<string, number>();
+
+  for (let latIndex = latStart; latIndex <= latEnd; latIndex += 1) {
+    const centerLat = -90 + (latIndex + 0.5) * latStep;
+    for (const [rangeMin, rangeMax] of longitudeRanges) {
+      const lngStart = Math.max(0, Math.min(maxLngIndex, Math.floor((rangeMin + 180) / lngStep)));
+      const adjustedMax = rangeMax === 180 ? 180 - Number.EPSILON : rangeMax;
+      const lngEnd = Math.max(0, Math.min(maxLngIndex, Math.floor((adjustedMax + 180) / lngStep)));
+      for (let lngIndex = lngStart; lngIndex <= lngEnd; lngIndex += 1) {
+        const centerLng = -180 + (lngIndex + 0.5) * lngStep;
+        const hash = encodeGeohash(centerLat, centerLng, precision);
+        const dist = haversineMeters(lat, lng, centerLat, centerLng);
+        const existing = cellEntries.get(hash);
+        if (existing === undefined || dist < existing) {
+          cellEntries.set(hash, dist);
+        }
+      }
+    }
+  }
+
+  return [...cellEntries.entries()]
+    .sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]))
+    .map(([hash]) => hash);
+}
+
 function toRadians(degrees: number): number {
   return (degrees * Math.PI) / 180;
 }
 
 export function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const earthRadius = 6_371_000;
+  const earthRadius = EARTH_RADIUS_METERS;
   const dLat = toRadians(lat2 - lat1);
   const dLng = toRadians(lng2 - lng1);
   const a =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) ** 2;
-  return 2 * earthRadius * Math.asin(Math.sqrt(a));
+  const clampedA = Math.min(1, Math.max(0, a));
+  return 2 * earthRadius * Math.asin(Math.sqrt(clampedA));
 }
 
 async function consumeRateLimit(
@@ -239,7 +379,7 @@ async function consumeRateLimit(
   try {
     await doc.send(
       new UpdateCommand({
-        TableName: TABLE_NAME,
+        TableName: tableName(),
         Key: { PK: `RATE#${identityId}#${action}`, SK: String(windowStart) },
         UpdateExpression:
           'SET #count = if_not_exists(#count, :zero) + :one, expiresAt = :expiresAt, createdAt = if_not_exists(createdAt, :now)',
@@ -265,7 +405,7 @@ async function consumeRateLimit(
 async function getClanItem(clanId: string): Promise<ClanItem | undefined> {
   const result = await doc.send(
     new GetCommand({
-      TableName: TABLE_NAME,
+      TableName: tableName(),
       Key: { PK: clanPk(clanId), SK: 'META' },
       ConsistentRead: true,
     }),
@@ -276,7 +416,7 @@ async function getClanItem(clanId: string): Promise<ClanItem | undefined> {
 async function getMemberItem(clanId: string, sessionId: string): Promise<MemberItem | undefined> {
   const result = await doc.send(
     new GetCommand({
-      TableName: TABLE_NAME,
+      TableName: tableName(),
       Key: { PK: clanPk(clanId), SK: memberSk(sessionId) },
       ConsistentRead: true,
     }),
@@ -334,12 +474,15 @@ async function createClan(event: ResolverEvent, now: number) {
       joinedAt: now,
       expiresAt,
     };
+    const geohash = encodeGeohash(lat, lng);
     const clan: ClanItem = {
       clanId,
       title,
       category,
       lat,
       lng,
+      geoPK: `GEO#${geohash}`,
+      geoSK: expiresAt,
       createdAt: now,
       expiresAt,
     };
@@ -350,14 +493,14 @@ async function createClan(event: ResolverEvent, now: number) {
           TransactItems: [
             {
               Put: {
-                TableName: TABLE_NAME,
+                TableName: tableName(),
                 Item: { PK: clanPk(clanId), SK: 'META', ...clan },
                 ConditionExpression: 'attribute_not_exists(PK)',
               },
             },
             {
               Put: {
-                TableName: TABLE_NAME,
+                TableName: tableName(),
                 Item: { PK: clanPk(clanId), SK: memberSk(caller.sessionId), ...member },
                 ConditionExpression: 'attribute_not_exists(PK)',
               },
@@ -408,7 +551,7 @@ async function joinClan(event: ResolverEvent, now: number) {
         TransactItems: [
           {
             ConditionCheck: {
-              TableName: TABLE_NAME,
+              TableName: tableName(),
               Key: { PK: clanPk(clanId), SK: 'META' },
               ConditionExpression: 'expiresAt > :now',
               ExpressionAttributeValues: { ':now': now },
@@ -416,7 +559,7 @@ async function joinClan(event: ResolverEvent, now: number) {
           },
           {
             Put: {
-              TableName: TABLE_NAME,
+              TableName: tableName(),
               Item: { PK: clanPk(clanId), SK: memberSk(caller.sessionId), ...member },
               ConditionExpression: 'attribute_not_exists(PK)',
             },
@@ -435,6 +578,150 @@ async function joinClan(event: ResolverEvent, now: number) {
     }
     throw new Error('Unable to join clan');
   }
+}
+
+interface NearbyToken {
+  v: 1;
+  lat: number;
+  lng: number;
+  cellIndex: number;
+  exclusiveStartKey?: Record<string, unknown>;
+}
+
+function nearbyQueryCoordinates(lat: number, lng: number): { lat: number; lng: number } {
+  return {
+    lat: Math.round(lat * 1_000_000) / 1_000_000,
+    lng: Math.round(normalizeLongitude(lng) * 1_000_000) / 1_000_000,
+  };
+}
+
+function encodeNearbyToken(token: NearbyToken | null): string | null {
+  if (!token) return null;
+  return Buffer.from(JSON.stringify(token), 'utf8').toString('base64url');
+}
+
+function decodeNearbyToken(
+  raw: unknown,
+  lat: number,
+  lng: number,
+  cellsLength: number,
+): NearbyToken | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string' || raw.length > 4096) {
+    throw new Error('Invalid nextToken');
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as NearbyToken;
+    const expected = nearbyQueryCoordinates(lat, lng);
+    if (
+      parsed.v !== 1 ||
+      parsed.lat !== expected.lat ||
+      parsed.lng !== expected.lng ||
+      !Number.isInteger(parsed.cellIndex) ||
+      parsed.cellIndex < 0 ||
+      parsed.cellIndex >= cellsLength
+    ) {
+      throw new Error('Invalid nextToken');
+    }
+    return parsed;
+  } catch {
+    throw new Error('Invalid nextToken');
+  }
+}
+
+function publicNearbyClan(clan: ClanItem, distanceMeters: number) {
+  return {
+    clanId: clan.clanId,
+    title: clan.title,
+    category: clan.category,
+    createdAt: clan.createdAt,
+    expiresAt: clan.expiresAt,
+    distanceMeters: Math.round(distanceMeters),
+  };
+}
+
+async function nearbyClans(event: ResolverEvent, now: number) {
+  await requireSession(event, now);
+  const lat = requireCoordinate(event.arguments.lat, 'lat');
+  const lng = requireCoordinate(event.arguments.lng, 'lng');
+  const cells = geohashCellsForRadius(lat, lng);
+  if (cells.length === 0) {
+    return { items: [], nextToken: null, serverNow: now };
+  }
+
+  const token = decodeNearbyToken(event.arguments.nextToken, lat, lng, cells.length);
+  let cellIndex = token?.cellIndex ?? 0;
+  let exclusiveStartKey = token?.exclusiveStartKey;
+  let queryPages = 0;
+  const candidates = new Map<string, { clan: ClanItem; distanceMeters: number }>();
+
+  while (
+    cellIndex < cells.length &&
+    queryPages < NEARBY_MAX_QUERY_PAGES &&
+    candidates.size < NEARBY_PAGE_SIZE
+  ) {
+    const geoPK = `GEO#${cells[cellIndex]}`;
+    const result = await doc.send(
+      new QueryCommand({
+        TableName: tableName(),
+        IndexName: GEO_INDEX_NAME,
+        KeyConditionExpression: 'geoPK = :geoPK AND geoSK > :now',
+        ExpressionAttributeValues: {
+          ':geoPK': geoPK,
+          ':now': now,
+        },
+        Limit: Math.min(NEARBY_QUERY_PAGE_SIZE, NEARBY_PAGE_SIZE - candidates.size),
+        ExclusiveStartKey: exclusiveStartKey,
+        ScanIndexForward: true,
+      }),
+    );
+    queryPages += 1;
+
+    for (const rawItem of result.Items ?? []) {
+      const clan = rawItem as ClanItem;
+      if (
+        !clan.clanId ||
+        typeof clan.lat !== 'number' ||
+        typeof clan.lng !== 'number' ||
+        clan.expiresAt <= now
+      ) {
+        continue;
+      }
+      const distanceMeters = haversineMeters(lat, lng, clan.lat, clan.lng);
+      if (distanceMeters <= JOIN_RADIUS_METERS) {
+        const existing = candidates.get(clan.clanId);
+        if (!existing || distanceMeters < existing.distanceMeters) {
+          candidates.set(clan.clanId, { clan, distanceMeters });
+        }
+      }
+    }
+
+    const lastEvaluatedKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+    if (lastEvaluatedKey) {
+      exclusiveStartKey = lastEvaluatedKey;
+    } else {
+      cellIndex += 1;
+      exclusiveStartKey = undefined;
+    }
+  }
+
+  const items = [...candidates.values()]
+    .sort((a, b) => a.distanceMeters - b.distanceMeters || a.clan.clanId.localeCompare(b.clan.clanId))
+    .slice(0, NEARBY_PAGE_SIZE)
+    .map(({ clan, distanceMeters }) => publicNearbyClan(clan, distanceMeters));
+
+  const coordinates = nearbyQueryCoordinates(lat, lng);
+  const nextToken = cellIndex < cells.length
+    ? encodeNearbyToken({
+        v: 1,
+        lat: coordinates.lat,
+        lng: coordinates.lng,
+        cellIndex,
+        exclusiveStartKey,
+      })
+    : null;
+
+  return { items, nextToken, serverNow: now };
 }
 
 async function getClan(event: ResolverEvent, now: number) {
@@ -491,7 +778,7 @@ async function listMessages(event: ResolverEvent, now: number) {
 
   const result = await doc.send(
     new QueryCommand({
-      TableName: TABLE_NAME,
+      TableName: tableName(),
       KeyConditionExpression: 'PK = :pk AND begins_with(SK, :messagePrefix)',
       ExpressionAttributeValues: {
         ':pk': clanPk(clanId),
@@ -524,7 +811,7 @@ async function getMessage(event: ResolverEvent, now: number) {
 
   const result = await doc.send(
     new GetCommand({
-      TableName: TABLE_NAME,
+      TableName: tableName(),
       Key: { PK: clanPk(clanId), SK: messageSk(messageId) },
       ConsistentRead: true,
     }),
@@ -543,7 +830,7 @@ function payloadHash(clanId: string, text: string): string {
 async function getRequest(sessionId: string, requestId: string): Promise<RequestItem | undefined> {
   const result = await doc.send(
     new GetCommand({
-      TableName: TABLE_NAME,
+      TableName: tableName(),
       Key: { PK: `SESSION#${sessionId}`, SK: `REQUEST#${requestId}` },
       ConsistentRead: true,
     }),
@@ -687,7 +974,7 @@ async function sendMessage(event: ResolverEvent, now: number) {
         TransactItems: [
           {
             ConditionCheck: {
-              TableName: TABLE_NAME,
+              TableName: tableName(),
               Key: { PK: clanPk(clanId), SK: 'META' },
               ConditionExpression: 'expiresAt > :now',
               ExpressionAttributeValues: { ':now': now },
@@ -695,7 +982,7 @@ async function sendMessage(event: ResolverEvent, now: number) {
           },
           {
             ConditionCheck: {
-              TableName: TABLE_NAME,
+              TableName: tableName(),
               Key: { PK: clanPk(clanId), SK: memberSk(caller.sessionId) },
               ConditionExpression: 'expiresAt > :now',
               ExpressionAttributeValues: { ':now': now },
@@ -703,14 +990,14 @@ async function sendMessage(event: ResolverEvent, now: number) {
           },
           {
             Put: {
-              TableName: TABLE_NAME,
+              TableName: tableName(),
               Item: { PK: clanPk(clanId), SK: messageSk(messageId), ...message },
               ConditionExpression: 'attribute_not_exists(PK)',
             },
           },
           {
             Put: {
-              TableName: TABLE_NAME,
+              TableName: tableName(),
               Item: { PK: `SESSION#${caller.sessionId}`, SK: `REQUEST#${requestId}`, ...request },
               ConditionExpression: 'attribute_not_exists(PK)',
             },
@@ -770,6 +1057,8 @@ export async function handler(event: ResolverEvent): Promise<unknown> {
         return await createClan(event, now);
       case 'joinClan':
         return await joinClan(event, now);
+      case 'nearbyClans':
+        return await nearbyClans(event, now);
       case 'getClan':
         return await getClan(event, now);
       case 'listMessages':
