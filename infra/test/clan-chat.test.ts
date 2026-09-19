@@ -202,35 +202,41 @@ describe('Phase 2 resolver', () => {
       }
       return { Item: undefined };
     });
-    ddbMock.on(QueryCommand).resolves({
-      Items: [
-        {
-          PK: 'CLAN#clan-1',
-          SK: 'MSG#2',
-          messageId: '2',
-          clanId: 'clan-1',
-          memberId: 'member-1',
-          alias: 'SwiftFox-123',
-          text: 'private pending text',
-          status: 'PENDING',
-          revision: 1,
-          createdAt: now - 5,
-          expiresAt: now + 3000,
-        },
-        {
-          PK: 'CLAN#clan-1',
-          SK: 'MSG#1',
-          messageId: '1',
-          clanId: 'clan-1',
-          memberId: 'member-1',
-          alias: 'SwiftFox-123',
-          text: 'approved text',
-          status: 'APPROVED',
-          revision: 1,
-          createdAt: now - 10,
-          expiresAt: now + 3000,
-        },
-      ],
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      const prefix = String(input.ExpressionAttributeValues?.[':mutePrefix'] ?? '');
+      if (prefix.startsWith('MUTE#')) {
+        return { Items: [] };
+      }
+      return {
+        Items: [
+          {
+            PK: 'CLAN#clan-1',
+            SK: 'MSG#2',
+            messageId: '2',
+            clanId: 'clan-1',
+            memberId: 'member-1',
+            alias: 'SwiftFox-123',
+            text: 'private pending text',
+            status: 'PENDING',
+            revision: 1,
+            createdAt: now - 5,
+            expiresAt: now + 3000,
+          },
+          {
+            PK: 'CLAN#clan-1',
+            SK: 'MSG#1',
+            messageId: '1',
+            clanId: 'clan-1',
+            memberId: 'member-1',
+            alias: 'SwiftFox-123',
+            text: 'approved text',
+            status: 'APPROVED',
+            revision: 1,
+            createdAt: now - 10,
+            expiresAt: now + 3000,
+          },
+        ],
+      };
     });
 
     const result = await handler(event('listMessages', { clanId: 'clan-1' })) as {

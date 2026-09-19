@@ -18,6 +18,7 @@ import { join } from 'node:path';
 const SESSION_INACTIVITY_SECONDS = 86400;
 const DEFAULT_CLAN_LIFETIME_SECONDS = 3600;
 const JOIN_RADIUS_METERS = 5000;
+const DEFAULT_MODERATION_MODEL_ID = 'amazon.nova-lite-v1:0';
 
 function positiveInteger(value: unknown, fallback: number, name: string): number {
   if (value === undefined || value === null || value === '') {
@@ -30,6 +31,20 @@ function positiveInteger(value: unknown, fallback: number, name: string): number
   return parsed;
 }
 
+
+function booleanContext(value: unknown, fallback: boolean, name: string): boolean {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  if (value === true || value === 'true') {
+    return true;
+  }
+  if (value === false || value === 'false') {
+    return false;
+  }
+  throw new Error(`${name} must be true or false`);
+}
+
 export class ChugLiStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
@@ -39,6 +54,14 @@ export class ChugLiStack extends Stack {
       DEFAULT_CLAN_LIFETIME_SECONDS,
       'clanLifetimeSeconds',
     );
+    const aiReviewEnabled = booleanContext(
+      this.node.tryGetContext('aiReviewEnabled'),
+      true,
+      'aiReviewEnabled',
+    );
+    const moderationModelId =
+      String(this.node.tryGetContext('moderationModelId') ?? DEFAULT_MODERATION_MODEL_ID).trim() ||
+      DEFAULT_MODERATION_MODEL_ID;
 
     const table = new Table(this, 'ChugLiTable', {
       partitionKey: { name: 'PK', type: AttributeType.STRING },
@@ -103,7 +126,7 @@ export class ChugLiStack extends Stack {
       handler: 'handler',
       runtime: Runtime.NODEJS_22_X,
       memorySize: 512,
-      timeout: Duration.seconds(10),
+      timeout: Duration.seconds(15),
       bundling: { externalModules: ['@aws-sdk/*'] },
       logGroup: appLogGroup,
       environment: {
@@ -113,6 +136,11 @@ export class ChugLiStack extends Stack {
         JOIN_RADIUS_METERS: String(JOIN_RADIUS_METERS),
         APPSYNC_GRAPHQL_URL: api.graphqlUrl,
         APPSYNC_REGION: this.region,
+        AI_REVIEW_ENABLED: String(aiReviewEnabled),
+        MODERATION_MODEL_ID: moderationModelId,
+        MODERATION_REGION: this.region,
+        REVIEW_LEASE_SECONDS: '15',
+        REVIEW_COOLDOWN_SECONDS: '30',
       },
     });
     table.grantReadWriteData(appFn);
@@ -128,6 +156,9 @@ export class ChugLiStack extends Stack {
       ['Mutation', 'createClan'],
       ['Mutation', 'joinClan'],
       ['Mutation', 'sendMessage'],
+      ['Mutation', 'retryMessageReview'],
+      ['Mutation', 'reportMessage'],
+      ['Mutation', 'muteMember'],
       ['Query', 'nearbyClans'],
       ['Query', 'getClan'],
       ['Query', 'listMessages'],
@@ -186,6 +217,9 @@ $util.toJson(null)
       ['Mutation', 'createClan'],
       ['Mutation', 'joinClan'],
       ['Mutation', 'sendMessage'],
+      ['Mutation', 'retryMessageReview'],
+      ['Mutation', 'reportMessage'],
+      ['Mutation', 'muteMember'],
       ['Query', 'nearbyClans'],
       ['Query', 'getClan'],
       ['Query', 'listMessages'],
@@ -208,6 +242,16 @@ $util.toJson(null)
       }),
     );
 
+    if (aiReviewEnabled) {
+      appFn.addToRolePolicy(
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: ['bedrock:InvokeModel'],
+          resources: ['*'],
+        }),
+      );
+    }
+
     new CfnIdentityPoolRoleAttachment(this, 'GuestRoleAttachment', {
       identityPoolId: identityPool.ref,
       roles: { unauthenticated: guestRole.roleArn },
@@ -219,5 +263,7 @@ $util.toJson(null)
     new CfnOutput(this, 'GuestRoleArn', { value: guestRole.roleArn });
     new CfnOutput(this, 'ApiId', { value: api.apiId });
     new CfnOutput(this, 'ClanLifetimeSeconds', { value: String(clanLifetimeSeconds) });
+    new CfnOutput(this, 'AiReviewEnabled', { value: String(aiReviewEnabled) });
+    new CfnOutput(this, 'ModerationModelId', { value: moderationModelId });
   }
 }

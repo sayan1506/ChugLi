@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -15,11 +16,42 @@ import { formatClanCountdown } from '@/clan/expiry';
 import { useClanChat } from '@/hooks/useClanChat';
 import type { ChatMessage } from '@/chat/types';
 
-function MessageBubble({ message, mine }: { message: ChatMessage; mine: boolean }) {
+function MessageBubble({
+  message,
+  mine,
+  busy,
+  onReport,
+  onMute,
+  onRetryReview,
+}: {
+  message: ChatMessage;
+  mine: boolean;
+  busy: boolean;
+  onReport: () => void;
+  onMute: () => void;
+  onRetryReview: () => void;
+}) {
   return (
     <View style={[styles.message, mine ? styles.mine : styles.theirs]}>
       <Text style={styles.alias}>{mine ? 'You' : message.alias}</Text>
-      <Text style={styles.messageText}>{message.text ?? 'Message unavailable'}</Text>
+      <Text style={styles.messageText}>
+        {message.muted ? 'Muted message' : message.text ?? (message.status === 'PENDING' ? 'Held for review' : 'Message unavailable')}
+      </Text>
+      {message.status === 'PENDING' && mine ? (
+        <Pressable disabled={busy} onPress={onRetryReview} style={styles.inlineAction}>
+          <Text style={styles.inlineActionText}>Retry review</Text>
+        </Pressable>
+      ) : null}
+      {!mine && !message.muted ? (
+        <View style={styles.messageActions}>
+          <Pressable disabled={busy} onPress={onReport} style={styles.inlineAction}>
+            <Text style={styles.inlineActionText}>Report</Text>
+          </Pressable>
+          <Pressable disabled={busy} onPress={onMute} style={styles.inlineAction}>
+            <Text style={styles.inlineActionText}>Mute member</Text>
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -35,11 +67,15 @@ export default function ClanChatScreen() {
     loading,
     loadingMore,
     sending,
+    moderating,
     error,
     realtimeState,
     expired,
     remainingSeconds,
     sendMessage,
+    reportMessage,
+    retryMessageReview,
+    muteMember,
     loadMore,
     retry,
   } = useClanChat(clanId);
@@ -55,6 +91,24 @@ export default function ClanChatScreen() {
     }
     return 'Reconnecting…';
   }, [realtimeState]);
+
+
+  const chooseReportReason = (messageId: string) => {
+    Alert.alert('Report message', 'Choose a reason', [
+      { text: 'Threat', onPress: () => void reportMessage(messageId, 'THREAT') },
+      { text: 'Harassment', onPress: () => void reportMessage(messageId, 'HARASSMENT') },
+      { text: 'Spam', onPress: () => void reportMessage(messageId, 'SPAM') },
+      { text: 'Other', onPress: () => void reportMessage(messageId, 'OTHER') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  };
+
+  const confirmMute = (memberId: string, alias: string) => {
+    Alert.alert('Mute member', `Hide messages from ${alias} for this clan?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Mute', style: 'destructive', onPress: () => void muteMember(memberId) },
+    ]);
+  };
 
   const handleSend = async () => {
     const text = draft.trim();
@@ -153,7 +207,19 @@ export default function ClanChatScreen() {
         contentContainerStyle={messages.length ? styles.listContent : styles.emptyContent}
         data={messages}
         keyExtractor={(item) => item.messageId}
-        renderItem={({ item }) => <MessageBubble message={item} mine={item.memberId === clan.myMemberId} />}
+        renderItem={({ item }) => {
+          const mine = item.memberId === clan.myMemberId;
+          return (
+            <MessageBubble
+              message={item}
+              mine={mine}
+              busy={moderating}
+              onReport={() => chooseReportReason(item.messageId)}
+              onMute={() => confirmMute(item.memberId, item.alias)}
+              onRetryReview={() => void retryMessageReview(item.messageId)}
+            />
+          );
+        }}
         ListEmptyComponent={<Text style={styles.muted}>No messages yet. Say hello.</Text>}
         onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
       />
@@ -204,6 +270,9 @@ const styles = StyleSheet.create({
   theirs: { alignSelf: 'flex-start', backgroundColor: '#FFF' },
   alias: { fontSize: 11, fontWeight: '700', color: '#666', marginBottom: 3 },
   messageText: { color: '#111', fontSize: 16, lineHeight: 21 },
+  messageActions: { flexDirection: 'row', gap: 10, marginTop: 8, flexWrap: 'wrap' },
+  inlineAction: { paddingVertical: 4 },
+  inlineActionText: { color: '#355C8A', fontSize: 12, fontWeight: '700' },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 10, padding: 12, backgroundColor: '#FFF', borderTopWidth: 1, borderTopColor: '#E4E4E4' },
   composerInput: { flex: 1, maxHeight: 120, minHeight: 44, borderWidth: 1, borderColor: '#D4D4D4', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 10, color: '#111', backgroundColor: '#FFF' },
   sendButton: { height: 44, minWidth: 72, backgroundColor: '#111', borderRadius: 14, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14 },

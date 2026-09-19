@@ -1,74 +1,62 @@
 # ChugLi
 
-ChugLi is an installable React Native + Expo mobile application backed by AWS AppSync, Lambda, DynamoDB, and Cognito guest identities. Users enter without registration, discover short-lived clans near their current location, create or join a clan, and exchange live text messages under temporary aliases.
+ChugLi is an installable React Native + Expo mobile application backed by AWS AppSync, Lambda, DynamoDB, Cognito guest identities, and selected Amazon Bedrock moderation reviews. Guests discover nearby short-lived clans, create or join them, and chat under temporary aliases without registration.
 
-## Current Implementation Status
+## Current implementation status
 
-**Source implementation is present through Phase 4.** Phase 1 guest-session fixes, the Phase 2 realtime clan-chat path, and Phase 3 geohash discovery are retained. Phase 4 adds the complete clan-expiry/mobile-lifecycle behavior required by the build roadmap.
+**Source implementation is present through Phase 5.** Phases 1–4 remain intact: guest AWS authorization, realtime clan chat, geohash discovery, and server-authoritative clan expiry/mobile lifecycle. Phase 5 adds moderation, reporting, review control, hidden-message propagation, and personal mute.
 
-Phase 4 packaging performed dependency-free source checks successfully, but this packaging environment could not complete `npm ci` because DNS resolution for `registry.npmjs.org` failed with `EAI_AGAIN`. Therefore the exact Phase 4 ZIP is **not** falsely marked as having rerun the full typecheck/test/lint/CDK-synth/Expo-Doctor suite. Run the commands below locally before deployment.
+Phase 5 includes:
 
-Implemented through Phase 4:
+- pre-publication spam and narrow threat-pattern checks;
+- `APPROVED`, `PENDING`, `BLOCKED`, and `HIDDEN` message states;
+- bounded Nova Lite review through Bedrock Converse with an 8-second application deadline and capped output;
+- strict `ALLOW` / `BLOCK` / `REVIEW` verdict validation;
+- review leases and cooldowns to prevent duplicate uncontrolled model work;
+- one report per message per application session, with controlled retry of unfinished reviews;
+- sender retry for held `PENDING` messages after cooldown;
+- content-free `APPROVED` / `HIDDEN` clan events, with authorized reads remaining the source of truth;
+- reporter-side immediate local hiding while a report is reviewed;
+- server-enforced personal mute that redacts the muted member's text on future reads;
+- an `aiReviewEnabled` CDK switch so mute and the rest of the app continue to work when AI review is paused;
+- report, mute, and retry-review actions in the native chat screen;
+- privacy hardening so another member's `PENDING` or `BLOCKED` submission is not returned through history/direct reads.
 
-- React Native + Expo 54 + TypeScript + Expo Router
-- AWS CDK v2 backend in TypeScript
-- Single on-demand DynamoDB table with `PK`, `SK`, TTL `expiresAt`, and sparse `GSI_GEO`
-- AppSync GraphQL API with `AWS_IAM`
-- Cognito Identity Pool unauthenticated guest credentials
-- SigV4-signed HTTP GraphQL requests and IAM-authenticated AppSync WebSocket subscriptions
-- Rolling 24-hour guest application sessions
-- Clan creation with creator membership in one DynamoDB transaction
-- Server-generated geohash-5 index keys for clan metadata
-- Nearby discovery over every geohash cell intersecting the 5 km search bounding box
-- Exact Haversine filtering after the geo-index query
-- Opaque continuation tokens and client-side deduplication for paginated discovery
-- Public discovery results containing rounded distance but no stored clan coordinates
-- Join-by-ID and discovery-list joining with a fresh server-side 5 km check
-- One-hour server-generated clan lifetime by default
-- Shared expiry inherited by clan membership, messages, and retry-deduplication records
-- Backend expiry checks independent of delayed DynamoDB TTL deletion
-- Server-time-based native expiry countdown using monotonic elapsed time instead of the device wall clock
-- Expired-clan screen that clears transient message state and stops realtime activity
-- Cold-start clan validation before restoring realtime
-- Foreground-resume credential refresh, expiry revalidation, subscription restoration, and reconciliation
-- Temporary clan member IDs and aliases
-- Message send, recent history, single-message fetch, pagination, and retry deduplication
-- Basic create/send rate limits
-- Backend-only `publishClanEvent` mutation
-- Membership-authorized, clan-filtered `onClanEvent` subscription
-- Foreground reconciliation after subscription, reconnect, app resume, and every 30 seconds while active
-- Foreground location handling for discovery/create/join, including denied, unavailable, stale, last-known, and approximate-location states
-- No chat text persisted to SecureStore, AsyncStorage, or an offline database
+The normal clan lifetime remains **3600 seconds**. Chat text remains transient on mobile; it is not persisted in SecureStore, AsyncStorage, SQLite, or an offline message cache.
 
-## Repository Structure
+## Repository structure
 
 ```text
 ChugLi-main/
-├── .response/                  # Local phase reports; gitignored
+├── .response/
+│   └── phase-5-report.md       # Phase 5 implementation/verification handoff; gitignored
 ├── infra/
-│   ├── bin/                    # CDK entry
+│   ├── bin/
 │   ├── lambda/
-│   │   ├── start-session.ts    # Guest application-session resolver
-│   │   └── app.ts              # Clan/chat/discovery/subscription resolvers
-│   ├── lib/chugli-stack.ts     # AWS resources, IAM, resolvers, lifetime config
-│   ├── test/                   # Vitest resolver/discovery/expiry tests
-│   └── schema.graphql          # AppSync schema
+│   │   ├── start-session.ts
+│   │   ├── app.ts              # clan/chat/discovery/moderation/mute resolvers
+│   │   └── moderation.ts       # local rules, verdict validation, Bedrock Converse call
+│   ├── lib/chugli-stack.ts
+│   ├── test/
+│   └── schema.graphql
 ├── mobile/
-│   ├── app/                    # Expo Router screens
+│   ├── app/
 │   └── src/
-│       ├── auth/               # Cognito guest credentials
-│       ├── aws/                # SigV4 HTTP + AppSync realtime client
-│       ├── chat/               # Chat GraphQL documents/types
-│       ├── clan/               # Clan operations/types + expiry clock helpers
-│       ├── discovery/          # Nearby-page merge/format helpers
-│       ├── hooks/              # Session + live chat/lifecycle hooks
-│       ├── location/           # Foreground coordinate acquisition
-│       └── session/            # SecureStore session metadata only
-├── sync-config.ts              # CloudFormation outputs -> mobile/.env
+│       ├── auth/
+│       ├── aws/
+│       ├── chat/
+│       ├── clan/
+│       ├── discovery/
+│       ├── hooks/
+│       ├── location/
+│       └── session/
+├── sync-config.ts
 ├── Dockerfile
 ├── docker-compose.yml
 └── package.json
 ```
+
+`.response/` is intentionally listed in the root `.gitignore`; the phase report is included in handoff ZIPs but should not be committed.
 
 ## Prerequisites
 
@@ -76,10 +64,11 @@ ChugLi-main/
 - npm 10+
 - AWS CLI configured with the project deployment profile
 - Android device/emulator for native verification
-- Docker if using the repository verification container
+- working access to the configured Bedrock model/inference profile for the full moderation acceptance path
+- Docker only if using the repository verification container
 - EAS CLI only if using EAS cloud APK builds
 
-## Install and Verify
+## Install and verify
 
 From the repository root:
 
@@ -93,19 +82,17 @@ cd mobile
 npx expo-doctor
 ```
 
-Or run the clean-container verification path:
+Or use the clean-container path:
 
 ```bash
 docker compose run --rm verify
 ```
 
-Do not mark Phase 4 fully complete until these checks pass for this exact revision and the live expiry scenarios below are verified on Android.
+The source package was dependency-free syntax/smoke audited during packaging. The packaging environment could not complete `npm ci` because `registry.npmjs.org` DNS resolution returned `EAI_AGAIN`, so the full npm-based suite must be run locally before claiming automated acceptance for this exact ZIP. See `.response/phase-5-report.md` for the exact verification record.
 
-## Deploy Backend
+## Deploy backend
 
-The existing `ChugLi` stack is updated in place; Phase 4 does not add another AWS service.
-
-Normal one-hour deployment:
+Normal deployment:
 
 ```bash
 cd infra
@@ -115,57 +102,56 @@ cd ..
 npm run sync-config -- --profile chugli --region us-east-1
 ```
 
-Only public identifiers are written to `mobile/.env`:
+Only public identifiers belong in `mobile/.env`:
 
 - `EXPO_PUBLIC_APPSYNC_GRAPHQL_URL`
 - `EXPO_PUBLIC_AWS_REGION`
 - `EXPO_PUBLIC_COGNITO_IDENTITY_POOL_ID`
 - `EXPO_PUBLIC_APPSYNC_API_ID`
 
-Never commit `.env`, credentials, signing keys, or long-lived AWS keys.
+Never commit `.env`, AWS credentials, APK signing keys, or long-lived access keys.
 
-## Accelerated Phase 4 Expiry Test
+### Moderation configuration
 
-The normal clan lifetime remains **3600 seconds**. For a clearly labelled live acceptance test, deploy the same stack with an explicit CDK context override, for example 120 seconds:
+Default model:
+
+```text
+amazon.nova-lite-v1:0
+```
+
+Override the model/inference-profile ID if the selected account/region uses a different accessible identifier:
 
 ```bash
-cd infra
 npx cdk deploy \
-  -c clanLifetimeSeconds=120 \
+  -c moderationModelId=<model-or-inference-profile-id> \
   --profile chugli \
   --region us-east-1 \
   --require-approval never
-cd ..
-npm run sync-config -- --profile chugli --region us-east-1
 ```
 
-After the short-lifetime test, redeploy **without** `-c clanLifetimeSeconds=...` to restore the normal 3600-second configuration.
-
-## Run the Mobile App
+Pause AI review without disabling personal mute or normal chat:
 
 ```bash
-npm run mobile:start
+npx cdk deploy \
+  -c aiReviewEnabled=false \
+  --profile chugli \
+  --region us-east-1 \
+  --require-approval never
 ```
 
-Phase 4 phone flow:
+When AI review is paused, locally held messages remain `PENDING`; reported approved messages remain in their pre-review state for other members, while the reporter still hides the reported text locally. The Lambda receives no Bedrock invocation permission in that deployment mode.
 
-1. Start or restore the guest session.
-2. Create or join a clan and open chat.
-3. Confirm the header countdown is based on backend `serverNow` / `expiresAt` and decreases normally.
-4. With the accelerated test stack, keep the app open until expiry. The chat must close, transient messages must be cleared, and realtime must stop.
-5. Create another short-lived clan, background the app until after expiry, then resume it. The app must revalidate with AWS and stay on the expired state rather than restoring chat.
-6. Repeat after force-closing the app and reopening the same clan route. Cold start must verify server expiry before showing content or starting realtime.
-7. Change the Android wall clock while testing. Device-clock manipulation must not restore backend access; the active countdown uses server time plus monotonic elapsed time and resume/cold-start always recheck the backend.
-8. Confirm expired DynamoDB rows may still physically exist while AppSync reads/writes/subscription registration reject access.
+## Phase 5 API
 
-## Phase 4 API
-
-Client-accessible fields remain:
+Client-accessible fields:
 
 - `Mutation.startSession`
 - `Mutation.createClan`
 - `Mutation.joinClan`
 - `Mutation.sendMessage`
+- `Mutation.retryMessageReview`
+- `Mutation.reportMessage`
+- `Mutation.muteMember`
 - `Query.nearbyClans`
 - `Query.getClan`
 - `Query.listMessages`
@@ -176,94 +162,106 @@ Backend-only field:
 
 - `Mutation.publishClanEvent`
 
-The guest IAM role has no direct DynamoDB access and cannot call `publishClanEvent`.
+The guest IAM role has no direct DynamoDB permission, no Bedrock permission, and no permission to call `publishClanEvent`. Bedrock invocation is granted only to the application Lambda when AI review is enabled.
 
-## Expiry and Lifecycle Design
+## Moderation flow
 
-At clan creation the backend calculates:
+### Send path
 
-```text
-expiresAt = serverNow + clanLifetimeSeconds
+1. Validate session, membership, clan expiry, message length, rate limit, and retry-deduplication state.
+2. Run cheap local checks before shared publication.
+3. Ordinary text is committed as `APPROVED` and emits a content-free clan event.
+4. Narrow threat/spam patterns are committed as `PENDING` and **not published**.
+5. If AI review is enabled, acquire a per-message review lease and call Bedrock with at most five recent approved context messages.
+6. `ALLOW` moves a held message to `APPROVED` and publishes the change event.
+7. `BLOCK` moves a held message to `BLOCKED`; it is not published to other members.
+8. `REVIEW`, timeout, HTTP failure, or invalid output leaves the held message pending and applies a cooldown before retry.
+
+### Report path
+
+- Reports use `REPORT#<messageId>#<sessionId>`, so one session cannot create duplicate report rows for the same message.
+- The reporter hides the text immediately in local state.
+- The backend reviews an approved reported message under the same lease/cooldown mechanism.
+- A `BLOCK` verdict changes the message to `HIDDEN`, increments its revision, and publishes a content-free hidden event so active clients remove the text.
+- Duplicate report requests never create another report row. If the previous review is unfinished, a duplicate request can retry only through the existing lease/cooldown gate; a completed review is not invoked again.
+
+### Personal mute
+
+`muteMember` stores a clan-scoped mute row tied to the requesting application session and clan expiry. `listMessages` and `getMessage` redact text from muted members on the server. The client also clears already-visible text from that member immediately after a successful mute. Mute does not depend on Bedrock.
+
+## Privacy and state visibility
+
+- Exact clan coordinates remain backend-only.
+- Message bodies are never placed in subscription events.
+- Another member's `PENDING` and `BLOCKED` submissions are filtered out of history and direct-message reads.
+- A `HIDDEN` message is returned as a content-free tombstone so clients can remove previously visible text.
+- Muted member text is redacted on authorized reads.
+- Operational error logs record operation/error type, not message bodies or coordinates.
+- AI context is bounded to the target text, the report trigger/reason, and at most five recent approved clan messages.
+- Conversation text is serialized as untrusted input; it is not allowed to become model instructions.
+
+## Language coverage and limitations
+
+The cheap pre-check intentionally uses narrow examples rather than claiming broad language understanding. Current patterns include simple English threat forms and a small set of Hindi/Hinglish phrases such as `jaan se maar dunga` and `goli maar dunga`, plus obvious spam patterns such as repeated URLs/characters/words.
+
+These heuristics can miss slang, obfuscation, spelling variants, context-dependent harassment, and many languages. They can also produce false positives. Bedrock review is therefore treated as a bounded classifier, not a perfect safety system; malformed or uncertain model output does not automatically publish held content.
+
+## Phase 5 live acceptance
+
+After deploying with a working moderation model:
+
+1. Use two member sessions in the same active clan.
+2. Send an ordinary benign message and verify the other client receives it normally.
+3. Send a labelled threat-pattern test message and verify the other member never sees its text while it is `PENDING`/`BLOCKED`.
+4. Exercise an AI `ALLOW` outcome and verify an approved held message appears only after the approved event/read.
+5. Report an approved test message and verify the reporter hides it immediately.
+6. Exercise a violating report outcome and verify both active clients remove the message after the `HIDDEN` event; subsequent history reads must return no original text.
+7. Repeat the same report and verify only one report row exists and completed review work is not repeated.
+8. Force a model failure/invalid output and verify the controlled pending/cooldown behavior.
+9. Mute another member and verify their existing/future text is hidden even with `aiReviewEnabled=false`.
+10. Re-run the Phase 4 expiry/resume/cold-start checks to confirm moderation did not regress lifecycle enforcement.
+
+## Existing expiry/discovery behavior
+
+The normal clan lifetime is generated by the backend. Clan-owned records inherit the same `expiresAt`; functional access rejects expired clans independently of delayed DynamoDB TTL deletion. The mobile countdown is anchored to backend time and monotonic elapsed time, with fresh server validation on foreground resume/cold start.
+
+Discovery uses backend-generated geohash-5 index keys plus exact Haversine filtering. Discovery never grants membership; joining performs a fresh server-side distance and expiry check.
+
+For an accelerated expiry acceptance test only:
+
+```bash
+cd infra
+npx cdk deploy -c clanLifetimeSeconds=120 --profile chugli --region us-east-1 --require-approval never
 ```
 
-The default `clanLifetimeSeconds` is 3600. Creator membership, joined memberships, chat messages, and send request-deduplication rows inherit the clan's exact `expiresAt` value.
+Redeploy without the context override afterward to restore 3600 seconds.
 
-Functional access never depends on DynamoDB TTL physically deleting an item. `getClan`, `listMessages`, `getMessage`, `sendMessage`, joining, and subscription registration all require an active clan at server time. Discovery also excludes expired index entries. DynamoDB TTL remains background cleanup only.
+## APK build
 
-On mobile, `serverNow` establishes a server-time anchor. The countdown advances using monotonic elapsed time instead of trusting the device wall clock. At local countdown expiry, the hook clears in-memory chat state, stops the subscription, disables sending, and renders the expired-clan state. Foreground resume and cold start still perform fresh server reads so a suspended JavaScript timer is never treated as authoritative.
-
-Returning from background clears the in-memory temporary-credential cache. The first signed HTTP reconciliation obtains current Cognito credentials, verifies clan state, then realtime is restored only if the clan is still active. The existing realtime client also obtains credentials again when reconnecting a lost socket.
-
-## Nearby Discovery Design
-
-Clan creation stores a five-character geohash calculated by the backend:
-
-```text
-geoPK = GEO#<geohash5>
-geoSK = expiresAt
-```
-
-`nearbyClans` validates the caller/session and coordinates, enumerates intersecting cells, queries only index rows with `geoSK > serverNow`, applies exact Haversine filtering, removes expired/out-of-radius candidates, deduplicates by clan ID, and returns public metadata with rounded distance. Discovery never grants membership; joining rereads the current clan and performs a fresh server-side distance/expiry check.
-
-## Data and Security Rules
-
-- Caller identity comes from AppSync's verified IAM/Cognito context.
-- Application sessions use server-generated IDs and rolling 24-hour inactivity expiry.
-- Clan IDs, member IDs, aliases, message IDs, timestamps, and status are generated or validated server-side.
-- Clan centre coordinates remain private backend/index data and are not returned by `Clan` or `NearbyClan`.
-- The client never supplies a geohash; the backend calculates it from validated coordinates.
-- Joining performs a fresh server-side distance check against the stored clan centre.
-- Clan and clan-owned records use the same server-generated expiry.
-- Reads, sends, and subscription registration require active membership and an unexpired clan.
-- Message text is limited to 500 Unicode characters.
-- Send retries use `requestId` + payload hash so a retried committed request does not create another message.
-- Subscription events contain IDs/status/revision/expiry only; clients fetch authorized message content after an approved event.
-- Chat text remains transient React/Apollo state and is not stored in SecureStore, AsyncStorage, or an offline database.
-- Guest role has no DynamoDB, Bedrock, or internal publisher permissions.
-- Operational Lambda logging records operation/error type rather than message text or coordinates.
-
-## Realtime Behavior
-
-`sendMessage` commits the message and deduplication row transactionally. The Lambda then invokes the IAM-protected backend-only `publishClanEvent` mutation. Publication failure does not roll back the committed message; clients recover through reconciliation.
-
-The mobile app:
-
-- validates the clan before starting realtime on cold load;
-- establishes an IAM-authenticated AppSync WebSocket only for an active clan;
-- registers `onClanEvent(clanId)`;
-- fetches message content after an `APPROVED` event;
-- reconciles immediately after subscription readiness;
-- reconnects automatically after socket loss;
-- stops realtime while backgrounded;
-- refreshes temporary credentials, revalidates expiry, then restores realtime on foreground resume;
-- reconciles every 30 seconds only while the app is active;
-- stops realtime and clears transient chat state at expiry.
-
-## EAS APK Build
-
-The existing preview profile produces an installable APK:
+The existing EAS preview profile produces an installable APK:
 
 ```bash
 cd mobile
 eas build --platform android --profile preview
 ```
 
-The final project submission still requires standalone APK verification in Phase 7. Development builds are sufficient for the Phase 4 lifecycle acceptance checks.
+Standalone APK/submission verification remains Phase 7. Phase 5 acceptance can use the native development/preview build against the deployed AWS stack.
 
-## Intentionally Deferred
+## Intentionally deferred
 
-The following remain later-phase work:
+Phase 6+ still includes:
 
-- Reporting and Nova Lite moderation (Phase 5)
-- Personal mute (Phase 5)
-- Full leave/report/mute product flow and native polish (Phase 6)
-- Maps
-- Push notifications
-- Direct messages
-- Media uploads
-- iOS release/store submission
+- full native UX polish and leave-flow completion;
+- broader loading/offline/retry product polish;
+- final physical-device accessibility/keyboard/back-navigation checks;
+- maps;
+- push notifications;
+- direct messages;
+- media uploads;
+- iOS release/store submission;
+- final signed standalone APK and submission/demo packaging.
 
-See `.response/phase-4-report.md` for this handoff's implementation and verification status.
+See `.response/phase-5-report.md` for the exact Phase 5 handoff and verification status.
 
 ## License
 

@@ -5,6 +5,13 @@ enum MessageStatus {
   HIDDEN
 }
 
+enum ReportReason {
+  THREAT
+  HARASSMENT
+  SPAM
+  OTHER
+}
+
 type Session {
   sessionId: ID!
   expiresAt: AWSTimestamp!
@@ -21,7 +28,6 @@ type Clan {
   myMemberId: ID!
   myAlias: String!
 }
-
 
 type NearbyClan {
   clanId: ID!
@@ -45,6 +51,7 @@ type Message {
   alias: String!
   text: String
   status: MessageStatus!
+  muted: Boolean!
   revision: Int!
   createdAt: AWSTimestamp!
   expiresAt: AWSTimestamp!
@@ -61,6 +68,21 @@ type SendMessageResult {
   status: MessageStatus!
   revision: Int!
   expiresAt: AWSTimestamp!
+  serverNow: AWSTimestamp!
+}
+
+type ModerationResult {
+  messageId: ID!
+  status: MessageStatus!
+  revision: Int!
+  expiresAt: AWSTimestamp!
+  serverNow: AWSTimestamp!
+  reviewPending: Boolean!
+}
+
+type MuteResult {
+  memberId: ID!
+  muted: Boolean!
   serverNow: AWSTimestamp!
 }
 
@@ -94,6 +116,9 @@ type Mutation {
   createClan(title: String!, category: String!, lat: Float!, lng: Float!): Clan!
   joinClan(clanId: ID!, lat: Float!, lng: Float!): Clan!
   sendMessage(clanId: ID!, requestId: ID!, text: String!): SendMessageResult!
+  retryMessageReview(clanId: ID!, messageId: ID!): ModerationResult!
+  reportMessage(clanId: ID!, messageId: ID!, reason: ReportReason!): ModerationResult!
+  muteMember(clanId: ID!, memberId: ID!): MuteResult!
   publishClanEvent(event: ClanEventInput!): ClanEvent!
 }
 

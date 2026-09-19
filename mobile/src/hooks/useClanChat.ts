@@ -13,8 +13,15 @@ import {
 } from '@/clan/expiry';
 import { GET_CLAN_QUERY } from '@/clan/operations';
 import type { Clan } from '@/clan/types';
-import { GET_MESSAGE_QUERY, LIST_MESSAGES_QUERY, SEND_MESSAGE_MUTATION } from '@/chat/operations';
-import type { ChatMessage, MessagePage } from '@/chat/types';
+import {
+  GET_MESSAGE_QUERY,
+  LIST_MESSAGES_QUERY,
+  MUTE_MEMBER_MUTATION,
+  REPORT_MESSAGE_MUTATION,
+  RETRY_MESSAGE_REVIEW_MUTATION,
+  SEND_MESSAGE_MUTATION,
+} from '@/chat/operations';
+import type { ChatMessage, MessagePage, ModerationResult, ReportReason } from '@/chat/types';
 
 interface SendResult {
   messageId: string;
@@ -46,7 +53,12 @@ export function mergeMessages(current: ChatMessage[], incoming: ChatMessage[]): 
   for (const item of incoming) {
     const existing = byId.get(item.messageId);
     if (!existing || item.revision >= existing.revision) {
-      byId.set(item.messageId, item);
+      byId.set(
+        item.messageId,
+        existing?.locallyHidden && item.revision === existing.revision
+          ? { ...item, text: null, locallyHidden: true }
+          : item,
+      );
     }
   }
   return [...byId.values()].sort((a, b) => {
@@ -64,6 +76,7 @@ export function useClanChat(clanId: string) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [sending, setSending] = useState(false);
+  const [moderating, setModerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [realtimeState, setRealtimeState] = useState<RealtimeState>('offline');
   const [expired, setExpired] = useState(false);
@@ -100,6 +113,7 @@ export function useClanChat(clanId: string) {
     setNextToken(null);
     setLoadingMore(false);
     setSending(false);
+    setModerating(false);
     setRealtimeState('offline');
     setError(null);
   }, []);
@@ -433,6 +447,126 @@ export function useClanChat(clanId: string) {
     }
   }, [clan, clanId, expireClan, fetchMessage, syncServerClock]);
 
+
+  const reportMessage = useCallback(async (messageId: string, reason: ReportReason) => {
+    if (expiredRef.current) {
+      throw new Error('Clan has expired');
+    }
+    setModerating(true);
+    setError(null);
+    try {
+      const { data } = await apolloClient.mutate<{ reportMessage: ModerationResult }>({
+        mutation: REPORT_MESSAGE_MUTATION,
+        variables: { clanId, messageId, reason },
+        fetchPolicy: 'network-only',
+      });
+      const result = data?.reportMessage;
+      if (!result) {
+        throw new Error('No report result returned');
+      }
+      if (clan) {
+        syncServerClock(clan.expiresAt, result.serverNow);
+      }
+      // The reporter hides the reported text immediately. If review later allows it,
+      // reconciliation still returns a redacted local copy only until the user reloads.
+      setMessages((current) => current.map((message) =>
+        message.messageId === messageId
+          ? { ...message, text: null, locallyHidden: true, status: result.status, revision: Math.max(message.revision, result.revision) }
+          : message,
+      ));
+      if (result.status === 'HIDDEN' || result.status === 'BLOCKED') {
+        await reconcile();
+      }
+      return result;
+    } catch (err) {
+      if (isExpiredClanError(err)) {
+        expireClan();
+      } else if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : 'Failed to report message');
+      }
+      throw err;
+    } finally {
+      if (mountedRef.current) {
+        setModerating(false);
+      }
+    }
+  }, [clan, clanId, expireClan, reconcile, syncServerClock]);
+
+  const retryMessageReview = useCallback(async (messageId: string) => {
+    if (expiredRef.current) {
+      throw new Error('Clan has expired');
+    }
+    setModerating(true);
+    setError(null);
+    try {
+      const { data } = await apolloClient.mutate<{ retryMessageReview: ModerationResult }>({
+        mutation: RETRY_MESSAGE_REVIEW_MUTATION,
+        variables: { clanId, messageId },
+        fetchPolicy: 'network-only',
+      });
+      const result = data?.retryMessageReview;
+      if (!result) {
+        throw new Error('No review result returned');
+      }
+      if (clan) {
+        syncServerClock(clan.expiresAt, result.serverNow);
+      }
+      const refreshed = await fetchMessage(messageId);
+      if (refreshed && mountedRef.current && !expiredRef.current) {
+        setMessages((current) => mergeMessages(current, [refreshed]));
+      }
+      return result;
+    } catch (err) {
+      if (isExpiredClanError(err)) {
+        expireClan();
+      } else if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : 'Failed to retry review');
+      }
+      throw err;
+    } finally {
+      if (mountedRef.current) {
+        setModerating(false);
+      }
+    }
+  }, [clan, clanId, expireClan, fetchMessage, syncServerClock]);
+
+  const muteMember = useCallback(async (memberId: string) => {
+    if (expiredRef.current) {
+      throw new Error('Clan has expired');
+    }
+    setModerating(true);
+    setError(null);
+    try {
+      const { data } = await apolloClient.mutate<{ muteMember: { memberId: string; muted: boolean; serverNow: number } }>({
+        mutation: MUTE_MEMBER_MUTATION,
+        variables: { clanId, memberId },
+        fetchPolicy: 'network-only',
+      });
+      const result = data?.muteMember;
+      if (!result) {
+        throw new Error('No mute result returned');
+      }
+      if (clan) {
+        syncServerClock(clan.expiresAt, result.serverNow);
+      }
+      setMessages((current) => current.map((message) =>
+        message.memberId === memberId ? { ...message, text: null, muted: true } : message,
+      ));
+      return result;
+    } catch (err) {
+      if (isExpiredClanError(err)) {
+        expireClan();
+      } else if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : 'Failed to mute member');
+      }
+      throw err;
+    } finally {
+      if (mountedRef.current) {
+        setModerating(false);
+      }
+    }
+  }, [clan, clanId, expireClan, syncServerClock]);
+
   const retry = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -456,11 +590,15 @@ export function useClanChat(clanId: string) {
     loading,
     loadingMore,
     sending,
+    moderating,
     error,
     realtimeState,
     expired,
     remainingSeconds,
     sendMessage,
+    reportMessage,
+    retryMessageReview,
+    muteMember,
     loadMore,
     retry,
     reconcile,

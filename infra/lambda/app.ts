@@ -8,6 +8,7 @@ import {
   TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { localModerationDecision, reviewWithBedrock, type ModelModerationDecision } from './moderation';
 
 interface SessionItem {
   sessionId: string;
@@ -44,6 +45,13 @@ interface MessageItem {
   revision: number;
   createdAt: number;
   expiresAt: number;
+  senderSessionId?: string;
+  requestId?: string;
+  reviewLeaseToken?: string;
+  reviewLeaseUntil?: number;
+  reviewCooldownUntil?: number;
+  reviewState?: string;
+  reviewReason?: string;
 }
 
 interface RequestItem {
@@ -58,6 +66,15 @@ interface RequestItem {
 interface CallerSession {
   identityId: string;
   sessionId: string;
+}
+
+interface ReportItem {
+  messageId: string;
+  sessionId: string;
+  reason: string;
+  reviewState: string;
+  createdAt: number;
+  expiresAt: number;
 }
 
 interface ClanEvent {
@@ -90,6 +107,11 @@ const CREATE_CLAN_LIMIT = 3;
 const CREATE_CLAN_WINDOW_SECONDS = 3600;
 const SEND_LIMIT = 10;
 const SEND_WINDOW_SECONDS = 60;
+const REVIEW_LEASE_SECONDS = Number(process.env.REVIEW_LEASE_SECONDS ?? '15');
+const REVIEW_COOLDOWN_SECONDS = Number(process.env.REVIEW_COOLDOWN_SECONDS ?? '30');
+const MODERATION_MODEL_ID = process.env.MODERATION_MODEL_ID ?? 'amazon.nova-lite-v1:0';
+const MODERATION_REGION = process.env.MODERATION_REGION ?? process.env.AWS_REGION ?? 'us-east-1';
+const AI_REVIEW_ENABLED = (process.env.AI_REVIEW_ENABLED ?? 'true').toLowerCase() === 'true';
 
 const doc = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: { removeUndefinedValues: true },
@@ -217,6 +239,14 @@ function memberSk(sessionId: string): string {
 
 function messageSk(messageId: string): string {
   return `MSG#${messageId}`;
+}
+
+function muteSk(sessionId: string, memberId: string): string {
+  return `MUTE#${sessionId}#${memberId}`;
+}
+
+function reportSk(messageId: string, sessionId: string): string {
+  return `REPORT#${messageId}#${sessionId}`;
 }
 
 function createMessageId(): string {
@@ -756,14 +786,48 @@ function decodeNextToken(token: unknown, clanId: string): Record<string, unknown
   }
 }
 
-function publicMessage(item: MessageItem) {
+async function getMessageItem(clanId: string, messageId: string): Promise<MessageItem | undefined> {
+  const result = await doc.send(
+    new GetCommand({
+      TableName: tableName(),
+      Key: { PK: clanPk(clanId), SK: messageSk(messageId) },
+      ConsistentRead: true,
+    }),
+  );
+  return result.Item as MessageItem | undefined;
+}
+
+async function mutedMemberIds(clanId: string, sessionId: string, now: number): Promise<Set<string>> {
+  const result = await doc.send(
+    new QueryCommand({
+      TableName: tableName(),
+      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :mutePrefix)',
+      ExpressionAttributeValues: {
+        ':pk': clanPk(clanId),
+        ':mutePrefix': `MUTE#${sessionId}#`,
+      },
+      ConsistentRead: true,
+    }),
+  );
+
+  return new Set(
+    (result.Items ?? [])
+      .filter((item) => typeof item.expiresAt === 'number' && item.expiresAt > now)
+      .map((item) => String(item.memberId ?? ''))
+      .filter(Boolean),
+  );
+}
+
+function publicMessage(item: MessageItem, muted: ReadonlySet<string> = new Set()) {
+  const isMuted = muted.has(item.memberId);
   return {
     messageId: item.messageId,
     clanId: item.clanId,
     memberId: item.memberId,
     alias: item.alias,
-    text: item.status === 'APPROVED' ? item.text : null,
+    text: item.status === 'APPROVED' && !isMuted ? item.text : null,
     status: item.status,
+    muted: isMuted,
     revision: item.revision,
     createdAt: item.createdAt,
     expiresAt: item.expiresAt,
@@ -773,7 +837,8 @@ function publicMessage(item: MessageItem) {
 async function listMessages(event: ResolverEvent, now: number) {
   const caller = await requireSession(event, now);
   const clanId = requireClanId(event.arguments.clanId);
-  await requireMembership(clanId, caller.sessionId, now);
+  const { member } = await requireMembership(clanId, caller.sessionId, now);
+  const muted = await mutedMemberIds(clanId, caller.sessionId, now);
   const exclusiveStartKey = decodeNextToken(event.arguments.nextToken, clanId);
 
   const result = await doc.send(
@@ -794,7 +859,15 @@ async function listMessages(event: ResolverEvent, now: number) {
   const items = (result.Items ?? [])
     .map((item) => item as MessageItem)
     .filter((item) => item.expiresAt > now)
-    .map(publicMessage);
+    // Held/blocked submissions are private to their sender. Other members see
+    // nothing until an APPROVED event/read makes the message visible. HIDDEN
+    // tombstones remain readable so clients can remove previously visible text.
+    .filter(
+      (item) =>
+        (item.status !== 'PENDING' && item.status !== 'BLOCKED') ||
+        item.memberId === member.memberId,
+    )
+    .map((item) => publicMessage(item, muted));
 
   return {
     items,
@@ -807,20 +880,19 @@ async function getMessage(event: ResolverEvent, now: number) {
   const caller = await requireSession(event, now);
   const clanId = requireClanId(event.arguments.clanId);
   const messageId = requireString(event.arguments.messageId, 'messageId', 180);
-  await requireMembership(clanId, caller.sessionId, now);
+  const { member } = await requireMembership(clanId, caller.sessionId, now);
 
-  const result = await doc.send(
-    new GetCommand({
-      TableName: tableName(),
-      Key: { PK: clanPk(clanId), SK: messageSk(messageId) },
-      ConsistentRead: true,
-    }),
-  );
-  const item = result.Item as MessageItem | undefined;
+  const [item, muted] = await Promise.all([
+    getMessageItem(clanId, messageId),
+    mutedMemberIds(clanId, caller.sessionId, now),
+  ]);
   if (!item || item.expiresAt <= now) {
     throw new Error('Message not found');
   }
-  return publicMessage(item);
+  if ((item.status === 'PENDING' || item.status === 'BLOCKED') && item.memberId !== member.memberId) {
+    throw new Error('Message not found');
+  }
+  return publicMessage(item, muted);
 }
 
 function payloadHash(clanId: string, text: string): string {
@@ -925,6 +997,484 @@ async function publishClanEvent(event: ClanEvent): Promise<void> {
   }
 }
 
+
+function moderationResult(item: MessageItem, now: number, reviewPending: boolean) {
+  return {
+    messageId: item.messageId,
+    status: item.status,
+    revision: item.revision,
+    expiresAt: item.expiresAt,
+    serverNow: now,
+    reviewPending,
+  };
+}
+
+async function recentModerationContext(
+  clanId: string,
+  targetMessageId: string,
+  now: number,
+): Promise<string[]> {
+  const result = await doc.send(
+    new QueryCommand({
+      TableName: tableName(),
+      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :messagePrefix)',
+      ExpressionAttributeValues: {
+        ':pk': clanPk(clanId),
+        ':messagePrefix': 'MSG#',
+      },
+      ScanIndexForward: false,
+      Limit: 10,
+      ConsistentRead: true,
+    }),
+  );
+
+  return (result.Items ?? [])
+    .map((item) => item as MessageItem)
+    .filter(
+      (item) =>
+        item.messageId !== targetMessageId &&
+        item.expiresAt > now &&
+        item.status === 'APPROVED' &&
+        typeof item.text === 'string' &&
+        item.text.length > 0,
+    )
+    .slice(0, 5)
+    .map((item) => `${item.alias}: ${item.text}`);
+}
+
+async function acquireReviewLease(
+  clanId: string,
+  item: MessageItem,
+  now: number,
+): Promise<{ token: string; leased: MessageItem } | null> {
+  const token = randomUUID();
+  try {
+    const result = await doc.send(
+      new UpdateCommand({
+        TableName: tableName(),
+        Key: { PK: clanPk(clanId), SK: messageSk(item.messageId) },
+        UpdateExpression:
+          'SET reviewLeaseToken = :token, reviewLeaseUntil = :leaseUntil, reviewCooldownUntil = :cooldownUntil, reviewState = :running',
+        ConditionExpression:
+          'expiresAt > :now AND #status = :status AND revision = :revision AND ' +
+          '(attribute_not_exists(reviewLeaseUntil) OR reviewLeaseUntil <= :now) AND ' +
+          '(attribute_not_exists(reviewCooldownUntil) OR reviewCooldownUntil <= :now)',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':token': token,
+          ':leaseUntil': now + REVIEW_LEASE_SECONDS,
+          ':cooldownUntil': now + REVIEW_COOLDOWN_SECONDS,
+          ':running': 'RUNNING',
+          ':now': now,
+          ':status': item.status,
+          ':revision': item.revision,
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return { token, leased: result.Attributes as MessageItem };
+  } catch (err) {
+    if (isConditionalFailure(err)) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function releaseReviewLease(
+  clanId: string,
+  item: MessageItem,
+  leaseToken: string,
+  now: number,
+  reason: string,
+): Promise<MessageItem> {
+  try {
+    const result = await doc.send(
+      new UpdateCommand({
+        TableName: tableName(),
+        Key: { PK: clanPk(clanId), SK: messageSk(item.messageId) },
+        UpdateExpression:
+          'SET reviewState = :pending, reviewReason = :reason, reviewCooldownUntil = :cooldownUntil REMOVE reviewLeaseToken, reviewLeaseUntil',
+        ConditionExpression:
+          'expiresAt > :now AND revision = :revision AND reviewLeaseToken = :leaseToken',
+        ExpressionAttributeValues: {
+          ':pending': 'PENDING',
+          ':reason': reason.slice(0, 80),
+          ':cooldownUntil': now + REVIEW_COOLDOWN_SECONDS,
+          ':now': now,
+          ':revision': item.revision,
+          ':leaseToken': leaseToken,
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return result.Attributes as MessageItem;
+  } catch (err) {
+    if (isConditionalFailure(err)) {
+      return (await getMessageItem(clanId, item.messageId)) ?? item;
+    }
+    throw err;
+  }
+}
+
+function nextReviewedStatus(
+  current: MessageItem['status'],
+  decision: ModelModerationDecision['decision'],
+): MessageItem['status'] {
+  if (decision === 'REVIEW') {
+    return current;
+  }
+  if (current === 'PENDING') {
+    return decision === 'ALLOW' ? 'APPROVED' : 'BLOCKED';
+  }
+  if (current === 'APPROVED') {
+    return decision === 'BLOCK' ? 'HIDDEN' : 'APPROVED';
+  }
+  return current;
+}
+
+async function applyReviewDecision(
+  clanId: string,
+  item: MessageItem,
+  leaseToken: string,
+  verdict: ModelModerationDecision,
+  now: number,
+): Promise<MessageItem> {
+  const nextStatus = nextReviewedStatus(item.status, verdict.decision);
+  const statusChanged = nextStatus !== item.status;
+  const nextRevision = statusChanged ? item.revision + 1 : item.revision;
+  const reviewState = verdict.decision === 'REVIEW' ? 'PENDING' : 'COMPLETE';
+
+  const transactItems: NonNullable<ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']> = [
+    {
+      Update: {
+        TableName: tableName(),
+        Key: { PK: clanPk(clanId), SK: messageSk(item.messageId) },
+        UpdateExpression:
+          'SET #status = :nextStatus, revision = :nextRevision, reviewState = :reviewState, reviewReason = :reason, reviewCooldownUntil = :cooldownUntil REMOVE reviewLeaseToken, reviewLeaseUntil',
+        ConditionExpression:
+          'expiresAt > :now AND #status = :expectedStatus AND revision = :expectedRevision AND reviewLeaseToken = :leaseToken',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':nextStatus': nextStatus,
+          ':nextRevision': nextRevision,
+          ':reviewState': reviewState,
+          ':reason': verdict.reason.slice(0, 80),
+          ':cooldownUntil': now + REVIEW_COOLDOWN_SECONDS,
+          ':now': now,
+          ':expectedStatus': item.status,
+          ':expectedRevision': item.revision,
+          ':leaseToken': leaseToken,
+        },
+      },
+    },
+  ];
+
+  if (item.senderSessionId && item.requestId && statusChanged) {
+    transactItems.push({
+      Update: {
+        TableName: tableName(),
+        Key: {
+          PK: `SESSION#${item.senderSessionId}`,
+          SK: `REQUEST#${item.requestId}`,
+        },
+        UpdateExpression: 'SET #status = :status, revision = :revision',
+        ConditionExpression: 'messageId = :messageId',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':status': nextStatus,
+          ':revision': nextRevision,
+          ':messageId': item.messageId,
+        },
+      },
+    });
+  }
+
+  try {
+    await doc.send(new TransactWriteCommand({ TransactItems: transactItems }));
+  } catch (err) {
+    if (isTransactionFailure(err)) {
+      return (await getMessageItem(clanId, item.messageId)) ?? item;
+    }
+    throw err;
+  }
+
+  const updated: MessageItem = {
+    ...item,
+    status: nextStatus,
+    revision: nextRevision,
+    reviewState,
+    reviewReason: verdict.reason,
+    reviewCooldownUntil: now + REVIEW_COOLDOWN_SECONDS,
+  };
+  delete updated.reviewLeaseToken;
+  delete updated.reviewLeaseUntil;
+
+  if (statusChanged && (nextStatus === 'APPROVED' || nextStatus === 'HIDDEN')) {
+    try {
+      await publishClanEvent({
+        eventId: randomUUID(),
+        clanId,
+        messageId: item.messageId,
+        status: nextStatus,
+        revision: nextRevision,
+        expiresAt: item.expiresAt,
+      });
+    } catch (err) {
+      logError('publishClanEvent', err);
+    }
+  }
+
+  return updated;
+}
+
+async function reviewMessage(
+  clanId: string,
+  item: MessageItem,
+  now: number,
+  trigger: string,
+  reportReason?: string,
+): Promise<{ item: MessageItem; reviewPending: boolean }> {
+  if (!AI_REVIEW_ENABLED) {
+    return { item, reviewPending: true };
+  }
+  if (item.status !== 'PENDING' && item.status !== 'APPROVED') {
+    return { item, reviewPending: false };
+  }
+
+  const lease = await acquireReviewLease(clanId, item, now);
+  if (!lease) {
+    const current = (await getMessageItem(clanId, item.messageId)) ?? item;
+    return { item: current, reviewPending: current.reviewState === 'RUNNING' || current.reviewState === 'PENDING' };
+  }
+
+  try {
+    const recentContext = await recentModerationContext(clanId, item.messageId, now);
+    const verdict = await reviewWithBedrock({
+      modelId: MODERATION_MODEL_ID,
+      region: MODERATION_REGION,
+      text: item.text,
+      trigger,
+      reportReason,
+      recentContext,
+      timeoutMs: 8_000,
+    });
+
+    if (!verdict) {
+      const released = await releaseReviewLease(clanId, item, lease.token, now, 'INVALID_MODEL_OUTPUT');
+      return { item: released, reviewPending: true };
+    }
+
+    const updated = await applyReviewDecision(clanId, item, lease.token, verdict, now);
+    return { item: updated, reviewPending: verdict.decision === 'REVIEW' };
+  } catch (err) {
+    logError('moderationReview', err);
+    const released = await releaseReviewLease(clanId, item, lease.token, now, 'MODEL_UNAVAILABLE');
+    return { item: released, reviewPending: true };
+  }
+}
+
+function requireReportReason(value: unknown): string {
+  if (value === 'THREAT' || value === 'HARASSMENT' || value === 'SPAM' || value === 'OTHER') {
+    return value;
+  }
+  throw new Error('Invalid report reason');
+}
+
+async function reportMessage(event: ResolverEvent, now: number) {
+  const caller = await requireSession(event, now);
+  const clanId = requireClanId(event.arguments.clanId);
+  const messageId = requireString(event.arguments.messageId, 'messageId', 180);
+  const reason = requireReportReason(event.arguments.reason);
+  const { clan } = await requireMembership(clanId, caller.sessionId, now);
+  const item = await getMessageItem(clanId, messageId);
+  if (!item || item.expiresAt <= now) {
+    throw new Error('Message not found');
+  }
+
+  const reportKey = { PK: clanPk(clanId), SK: reportSk(messageId, caller.sessionId) };
+  const report: ReportItem = {
+    messageId,
+    sessionId: caller.sessionId,
+    reason,
+    reviewState: 'RECORDED',
+    createdAt: now,
+    expiresAt: clan.expiresAt,
+  };
+
+  try {
+    await doc.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: tableName(),
+              Key: { PK: clanPk(clanId), SK: 'META' },
+              ConditionExpression: 'expiresAt > :now',
+              ExpressionAttributeValues: { ':now': now },
+            },
+          },
+          {
+            ConditionCheck: {
+              TableName: tableName(),
+              Key: { PK: clanPk(clanId), SK: memberSk(caller.sessionId) },
+              ConditionExpression: 'expiresAt > :now',
+              ExpressionAttributeValues: { ':now': now },
+            },
+          },
+          {
+            ConditionCheck: {
+              TableName: tableName(),
+              Key: { PK: clanPk(clanId), SK: messageSk(messageId) },
+              ConditionExpression: 'expiresAt > :now',
+              ExpressionAttributeValues: { ':now': now },
+            },
+          },
+          {
+            Put: {
+              TableName: tableName(),
+              Item: { ...reportKey, ...report },
+              ConditionExpression: 'attribute_not_exists(PK)',
+            },
+          },
+        ],
+      }),
+    );
+  } catch (err) {
+    if (!isTransactionFailure(err)) {
+      throw err;
+    }
+    const existing = await doc.send(
+      new GetCommand({
+        TableName: tableName(),
+        Key: reportKey,
+        ConsistentRead: true,
+      }),
+    );
+    if (existing.Item) {
+      // One report row per session is permanent for the clan lifetime, but a duplicate
+      // request may be an intentional retry after a previous model timeout/process exit.
+      // Re-read the message so we never return stale moderation state. Completed reviews
+      // are not invoked again; pending/unfinished reviews still pass through the shared
+      // lease + cooldown guard in reviewMessage().
+      const current = (await getMessageItem(clanId, messageId)) ?? item;
+      if (
+        AI_REVIEW_ENABLED &&
+        (current.status === 'APPROVED' || current.status === 'PENDING') &&
+        current.reviewState !== 'COMPLETE'
+      ) {
+        const retried = await reviewMessage(clanId, current, now, 'USER_REPORT_RETRY', reason);
+        return moderationResult(retried.item, now, retried.reviewPending);
+      }
+      return moderationResult(
+        current,
+        now,
+        !AI_REVIEW_ENABLED || current.reviewState === 'RUNNING' || current.reviewState === 'PENDING',
+      );
+    }
+    throw new Error('Unable to record report');
+  }
+
+  const reviewed = await reviewMessage(clanId, item, now, 'USER_REPORT', reason);
+  return moderationResult(reviewed.item, now, reviewed.reviewPending);
+}
+
+async function retryMessageReview(event: ResolverEvent, now: number) {
+  const caller = await requireSession(event, now);
+  const clanId = requireClanId(event.arguments.clanId);
+  const messageId = requireString(event.arguments.messageId, 'messageId', 180);
+  const { member } = await requireMembership(clanId, caller.sessionId, now);
+  const item = await getMessageItem(clanId, messageId);
+  if (!item || item.expiresAt <= now) {
+    throw new Error('Message not found');
+  }
+  if (item.memberId !== member.memberId) {
+    throw new Error('Only the sender can retry review');
+  }
+  if (item.status !== 'PENDING') {
+    return moderationResult(item, now, false);
+  }
+  if (typeof item.reviewCooldownUntil === 'number' && item.reviewCooldownUntil > now) {
+    throw new Error('Review retry cooldown active');
+  }
+
+  const reviewed = await reviewMessage(clanId, item, now, 'SENDER_RETRY');
+  return moderationResult(reviewed.item, now, reviewed.reviewPending);
+}
+
+async function muteMember(event: ResolverEvent, now: number) {
+  const caller = await requireSession(event, now);
+  const clanId = requireClanId(event.arguments.clanId);
+  const targetMemberId = requireString(event.arguments.memberId, 'memberId', 180);
+  const { clan, member } = await requireMembership(clanId, caller.sessionId, now);
+  if (targetMemberId === member.memberId) {
+    throw new Error('Cannot mute yourself');
+  }
+
+  const members = await doc.send(
+    new QueryCommand({
+      TableName: tableName(),
+      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :memberPrefix)',
+      ExpressionAttributeValues: {
+        ':pk': clanPk(clanId),
+        ':memberPrefix': 'MEMBER#',
+      },
+      ConsistentRead: true,
+    }),
+  );
+  const target = (members.Items ?? []).find(
+    (candidate) => candidate.memberId === targetMemberId && Number(candidate.expiresAt) > now,
+  );
+  if (!target || typeof target.SK !== 'string') {
+    throw new Error('Member not found');
+  }
+
+  await doc.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          ConditionCheck: {
+            TableName: tableName(),
+            Key: { PK: clanPk(clanId), SK: 'META' },
+            ConditionExpression: 'expiresAt > :now',
+            ExpressionAttributeValues: { ':now': now },
+          },
+        },
+        {
+          ConditionCheck: {
+            TableName: tableName(),
+            Key: { PK: clanPk(clanId), SK: memberSk(caller.sessionId) },
+            ConditionExpression: 'expiresAt > :now',
+            ExpressionAttributeValues: { ':now': now },
+          },
+        },
+        {
+          ConditionCheck: {
+            TableName: tableName(),
+            Key: { PK: clanPk(clanId), SK: target.SK },
+            ConditionExpression: 'expiresAt > :now AND memberId = :memberId',
+            ExpressionAttributeValues: { ':now': now, ':memberId': targetMemberId },
+          },
+        },
+        {
+          Put: {
+            TableName: tableName(),
+            Item: {
+              PK: clanPk(clanId),
+              SK: muteSk(caller.sessionId, targetMemberId),
+              memberId: targetMemberId,
+              createdAt: now,
+              expiresAt: clan.expiresAt,
+            },
+          },
+        },
+      ],
+    }),
+  );
+
+  return { memberId: targetMemberId, muted: true, serverNow: now };
+}
+
 async function sendMessage(event: ResolverEvent, now: number) {
   const caller = await requireSession(event, now);
   const clanId = requireClanId(event.arguments.clanId);
@@ -946,6 +1496,9 @@ async function sendMessage(event: ResolverEvent, now: number) {
   }
 
   await consumeRateLimit(caller.identityId, 'sendMessage', now);
+  const localDecision = localModerationDecision(text);
+  const initialStatus: MessageItem['status'] =
+    localDecision.action === 'ALLOW' ? 'APPROVED' : 'PENDING';
   const messageId = createMessageId();
   const revision = 1;
   const message: MessageItem = {
@@ -954,16 +1507,20 @@ async function sendMessage(event: ResolverEvent, now: number) {
     memberId: member.memberId,
     alias: member.alias,
     text,
-    status: 'APPROVED',
+    status: initialStatus,
     revision,
     createdAt: now,
     expiresAt: clan.expiresAt,
+    senderSessionId: caller.sessionId,
+    requestId,
+    reviewState: initialStatus === 'PENDING' ? 'PENDING' : undefined,
+    reviewReason: localDecision.action === 'REVIEW' ? localDecision.reason : undefined,
   };
   const request: RequestItem = {
     clanId,
     messageId,
     payloadHash: hash,
-    status: 'APPROVED',
+    status: initialStatus,
     revision,
     expiresAt: clan.expiresAt,
   };
@@ -1016,26 +1573,37 @@ async function sendMessage(event: ResolverEvent, now: number) {
     throw err;
   }
 
-  const clanEvent: ClanEvent = {
-    eventId: randomUUID(),
-    clanId,
-    messageId,
-    status: 'APPROVED',
-    revision,
-    expiresAt: clan.expiresAt,
-  };
-  try {
-    await publishClanEvent(clanEvent);
-  } catch (err) {
-    // The database commit is the source of truth. A publication failure is repaired
-    // by client reconciliation and must not encourage the caller to duplicate-send.
-    logError('publishClanEvent', err);
+  let finalMessage = message;
+  if (initialStatus === 'APPROVED') {
+    const clanEvent: ClanEvent = {
+      eventId: randomUUID(),
+      clanId,
+      messageId,
+      status: 'APPROVED',
+      revision,
+      expiresAt: clan.expiresAt,
+    };
+    try {
+      await publishClanEvent(clanEvent);
+    } catch (err) {
+      // The database commit is the source of truth. A publication failure is repaired
+      // by client reconciliation and must not encourage the caller to duplicate-send.
+      logError('publishClanEvent', err);
+    }
+  } else {
+    const reviewed = await reviewMessage(
+      clanId,
+      message,
+      now,
+      `LOCAL_${localDecision.action === 'REVIEW' ? localDecision.reason : 'REVIEW'}`,
+    );
+    finalMessage = reviewed.item;
   }
 
   return {
     messageId,
-    status: 'APPROVED' as const,
-    revision,
+    status: finalMessage.status,
+    revision: finalMessage.revision,
     expiresAt: clan.expiresAt,
     serverNow: now,
   };
@@ -1067,6 +1635,12 @@ export async function handler(event: ResolverEvent): Promise<unknown> {
         return await getMessage(event, now);
       case 'sendMessage':
         return await sendMessage(event, now);
+      case 'retryMessageReview':
+        return await retryMessageReview(event, now);
+      case 'reportMessage':
+        return await reportMessage(event, now);
+      case 'muteMember':
+        return await muteMember(event, now);
       case 'onClanEvent':
         return await authorizeSubscription(event, now);
       default:

@@ -9,6 +9,7 @@ function message(overrides: Partial<ChatMessage>): ChatMessage {
     alias: 'SwiftFox-123',
     text: 'hello',
     status: 'APPROVED',
+    muted: false,
     revision: 1,
     createdAt: 100,
     expiresAt: 1000,
@@ -25,6 +26,17 @@ describe('mergeMessages', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ messageId: 'm1', revision: 2, text: null, status: 'HIDDEN' });
+  });
+
+
+
+  it('preserves a reporter-side hidden message on equal-revision reconciliation', () => {
+    const result = mergeMessages(
+      [message({ messageId: 'm1', revision: 2, text: null, locallyHidden: true })],
+      [message({ messageId: 'm1', revision: 2, text: 'server text', status: 'APPROVED' })],
+    );
+
+    expect(result[0]).toMatchObject({ messageId: 'm1', revision: 2, text: null, locallyHidden: true });
   });
 
   it('sorts message history oldest to newest for the chat view', () => {
