@@ -40,6 +40,12 @@ export function isSessionValid(session: SessionData | null): boolean {
   if (!session) {
     return false;
   }
+  if (!session.sessionId || !session.identityId) {
+    return false;
+  }
+  if (!Number.isFinite(session.expiresAt) || !Number.isFinite(session.serverNow)) {
+    return false;
+  }
   const now = Math.floor(Date.now() / 1000);
   return session.expiresAt > now + 300;
 }

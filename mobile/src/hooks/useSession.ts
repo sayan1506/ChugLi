@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { apolloClient } from '@/aws/clients';
 import { START_SESSION_MUTATION } from '@/session/operations';
 import { saveSession, loadSession, isSessionValid, SessionData } from '@/session/store';
+import { getCredentials } from '@/auth/credentials';
 
 export type SessionState = 'idle' | 'loading' | 'success' | 'error';
 
@@ -36,6 +37,11 @@ export function useSession(): UseSessionReturn {
     setState('loading');
     setError(null);
     try {
+      // Resolve the Cognito identity before the mutation. The AppSync signer reuses
+      // these cached temporary credentials, so the persisted identity matches the
+      // verified caller identity used by startSession.
+      const credentials = await getCredentials();
+
       const { data } = await apolloClient.mutate({
         mutation: START_SESSION_MUTATION,
         fetchPolicy: 'network-only',
@@ -50,7 +56,7 @@ export function useSession(): UseSessionReturn {
         sessionId: result.sessionId,
         expiresAt: result.expiresAt,
         serverNow: result.serverNow,
-        identityId: '',
+        identityId: credentials.identityId,
       };
 
       await saveSession(sessionData);

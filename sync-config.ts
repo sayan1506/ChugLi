@@ -27,7 +27,7 @@ function runCommand(cmd: string, cwd: string): string {
 function getCdkOutputs(): CdkOutputs {
   const stackName = 'ChugLi';
   const outputs = runCommand(
-    `aws cloudformation describe-stacks --stack-name ${stackName} --query 'Stacks[0].Outputs' --output json --profile chugli --region us-east-1`,
+    `aws cloudformation describe-stacks --stack-name ${stackName} --query "Stacks[0].Outputs" --output json --profile chugli --region us-east-1`,
     __dirname
   );
   const parsed = JSON.parse(outputs);

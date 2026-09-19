@@ -1,18 +1,92 @@
+enum MessageStatus {
+  APPROVED
+  PENDING
+  BLOCKED
+  HIDDEN
+}
+
 type Session {
   sessionId: ID!
   expiresAt: AWSTimestamp!
   serverNow: AWSTimestamp!
 }
 
+type Clan {
+  clanId: ID!
+  title: String!
+  category: String!
+  createdAt: AWSTimestamp!
+  expiresAt: AWSTimestamp!
+  serverNow: AWSTimestamp!
+  myMemberId: ID!
+  myAlias: String!
+}
+
+type Message {
+  messageId: ID!
+  clanId: ID!
+  memberId: ID!
+  alias: String!
+  text: String
+  status: MessageStatus!
+  revision: Int!
+  createdAt: AWSTimestamp!
+  expiresAt: AWSTimestamp!
+}
+
+type MessagePage {
+  items: [Message!]!
+  nextToken: String
+  serverNow: AWSTimestamp!
+}
+
+type SendMessageResult {
+  messageId: ID!
+  status: MessageStatus!
+  revision: Int!
+  expiresAt: AWSTimestamp!
+  serverNow: AWSTimestamp!
+}
+
+type ClanEvent {
+  eventId: ID!
+  clanId: ID!
+  messageId: ID!
+  status: MessageStatus!
+  revision: Int!
+  expiresAt: AWSTimestamp!
+}
+
+input ClanEventInput {
+  eventId: ID!
+  clanId: ID!
+  messageId: ID!
+  status: MessageStatus!
+  revision: Int!
+  expiresAt: AWSTimestamp!
+}
+
 type Query {
-  placeholder: Boolean
+  getClan(clanId: ID!): Clan!
+  listMessages(clanId: ID!, nextToken: String): MessagePage!
+  getMessage(clanId: ID!, messageId: ID!): Message!
 }
 
 type Mutation {
   startSession: Session!
+  createClan(title: String!, category: String!, lat: Float!, lng: Float!): Clan!
+  joinClan(clanId: ID!, lat: Float!, lng: Float!): Clan!
+  sendMessage(clanId: ID!, requestId: ID!, text: String!): SendMessageResult!
+  publishClanEvent(event: ClanEventInput!): ClanEvent!
+}
+
+type Subscription {
+  onClanEvent(clanId: ID!): ClanEvent
+    @aws_subscribe(mutations: ["publishClanEvent"])
 }
 
 schema {
   query: Query
   mutation: Mutation
+  subscription: Subscription
 }

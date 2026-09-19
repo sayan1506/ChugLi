@@ -64,6 +64,11 @@ describe('session store', () => {
     expect(isSessionValid(null)).toBe(false);
   });
 
+  it('rejects a persisted session without a Cognito identity', () => {
+    const missingIdentity = { ...validSession, identityId: '' };
+    expect(isSessionValid(missingIdentity)).toBe(false);
+  });
+
   it('rejects session expiring soon', () => {
     const soon = { ...validSession, expiresAt: Math.floor(Date.now() / 1000) + 100 };
     expect(isSessionValid(soon)).toBe(false);
