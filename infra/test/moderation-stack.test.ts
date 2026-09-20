@@ -46,6 +46,10 @@ describe('Phase 5 infrastructure', () => {
       TypeName: 'Mutation',
       FieldName: 'muteMember',
     });
+    template.hasResourceProperties('AWS::AppSync::Resolver', {
+      TypeName: 'Mutation',
+      FieldName: 'leaveClan',
+    });
 
     const statements = policyStatements(template);
     expect(statements.some((statement) => hasAction(statement, 'bedrock:InvokeModel'))).toBe(true);

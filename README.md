@@ -4,9 +4,21 @@ ChugLi is an installable React Native + Expo mobile application backed by AWS Ap
 
 ## Current implementation status
 
-**Source implementation is present through Phase 5.** Phases 1–4 remain intact: guest AWS authorization, realtime clan chat, geohash discovery, and server-authoritative clan expiry/mobile lifecycle. Phase 5 adds moderation, reporting, review control, hidden-message propagation, and personal mute.
+**Source implementation is present through Phase 6.** Phases 1–5 remain intact: guest AWS authorization, realtime clan chat, geohash discovery, server-authoritative expiry/mobile lifecycle, moderation/reporting, and personal mute. Phase 6 completes the native tester-facing flow and adds a real server-enforced leave operation.
 
-Phase 5 includes:
+Phase 6 adds:
+
+- a user-facing guest entry screen without exposing session or identity identifiers;
+- complete discovery/create/join/chat/report/mute/leave/expiry navigation;
+- `Mutation.leaveClan`, which deletes only the caller's active membership and immediately removes clan access;
+- native clan sharing through the platform share sheet;
+- explicit connecting/offline/retry messaging for realtime chat;
+- clear pending/blocked/hidden/muted message presentation;
+- device-settings recovery for location permission/service errors;
+- 44–48 px primary touch targets and improved keyboard/chat interaction;
+- transient-state cleanup when leaving, so messages/subscriptions are not retained locally.
+
+Phase 5 moderation behavior retained in Phase 6 includes:
 
 - pre-publication spam and narrow threat-pattern checks;
 - `APPROVED`, `PENDING`, `BLOCKED`, and `HIDDEN` message states;
@@ -29,7 +41,8 @@ The normal clan lifetime remains **3600 seconds**. Chat text remains transient o
 ```text
 ChugLi-main/
 ├── .response/
-│   └── phase-5-report.md       # Phase 5 implementation/verification handoff; gitignored
+│   ├── phase-5-report.md       # Prior phase handoff; gitignored
+│   └── phase-6-report.md       # Phase 6 implementation/testing handoff; gitignored
 ├── infra/
 │   ├── bin/
 │   ├── lambda/
@@ -141,7 +154,7 @@ npx cdk deploy \
 
 When AI review is paused, locally held messages remain `PENDING`; reported approved messages remain in their pre-review state for other members, while the reporter still hides the reported text locally. The Lambda receives no Bedrock invocation permission in that deployment mode.
 
-## Phase 5 API
+## Current client API
 
 Client-accessible fields:
 
@@ -152,6 +165,7 @@ Client-accessible fields:
 - `Mutation.retryMessageReview`
 - `Mutation.reportMessage`
 - `Mutation.muteMember`
+- `Mutation.leaveClan`
 - `Query.nearbyClans`
 - `Query.getClan`
 - `Query.listMessages`
@@ -249,11 +263,10 @@ Standalone APK/submission verification remains Phase 7. Phase 5 acceptance can u
 
 ## Intentionally deferred
 
-Phase 6+ still includes:
+Phase 7+ still includes:
 
-- full native UX polish and leave-flow completion;
-- broader loading/offline/retry product polish;
-- final physical-device accessibility/keyboard/back-navigation checks;
+- final physical-device acceptance on the target Android phone, including Wi-Fi/mobile-data transition, keyboard, safe-area, and Android back-navigation checks;
+- standalone signed APK/submission packaging;
 - maps;
 - push notifications;
 - direct messages;

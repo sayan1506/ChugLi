@@ -16,6 +16,7 @@ import type { Clan } from '@/clan/types';
 import {
   GET_MESSAGE_QUERY,
   LIST_MESSAGES_QUERY,
+  LEAVE_CLAN_MUTATION,
   MUTE_MEMBER_MUTATION,
   REPORT_MESSAGE_MUTATION,
   RETRY_MESSAGE_REVIEW_MUTATION,
@@ -77,6 +78,7 @@ export function useClanChat(clanId: string) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [sending, setSending] = useState(false);
   const [moderating, setModerating] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [realtimeState, setRealtimeState] = useState<RealtimeState>('offline');
   const [expired, setExpired] = useState(false);
@@ -114,6 +116,7 @@ export function useClanChat(clanId: string) {
     setLoadingMore(false);
     setSending(false);
     setModerating(false);
+    setLeaving(false);
     setRealtimeState('offline');
     setError(null);
   }, []);
@@ -567,6 +570,51 @@ export function useClanChat(clanId: string) {
     }
   }, [clan, clanId, expireClan, syncServerClock]);
 
+  const leaveClan = useCallback(async () => {
+    if (expiredRef.current) {
+      throw new Error('Clan has expired');
+    }
+
+    setLeaving(true);
+    setError(null);
+    try {
+      const { data } = await apolloClient.mutate<{ leaveClan: boolean }>({
+        mutation: LEAVE_CLAN_MUTATION,
+        variables: { clanId },
+        fetchPolicy: 'network-only',
+      });
+      if (data?.leaveClan !== true) {
+        throw new Error('Failed to leave clan');
+      }
+
+      // Membership is gone on the server. Stop all local clan activity before
+      // navigation so no stale subscription or chat state survives the leave.
+      stopSubscription();
+      pendingSendRef.current = null;
+      serverClockRef.current = null;
+      if (mountedRef.current) {
+        setClan(null);
+        setMessages([]);
+        setNextToken(null);
+        setRemainingSeconds(null);
+        setSending(false);
+        setModerating(false);
+      }
+      return true;
+    } catch (err) {
+      if (isExpiredClanError(err)) {
+        expireClan();
+      } else if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : 'Failed to leave clan');
+      }
+      throw err;
+    } finally {
+      if (mountedRef.current) {
+        setLeaving(false);
+      }
+    }
+  }, [clanId, expireClan, stopSubscription]);
+
   const retry = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -591,6 +639,7 @@ export function useClanChat(clanId: string) {
     loadingMore,
     sending,
     moderating,
+    leaving,
     error,
     realtimeState,
     expired,
@@ -599,6 +648,7 @@ export function useClanChat(clanId: string) {
     reportMessage,
     retryMessageReview,
     muteMember,
+    leaveClan,
     loadMore,
     retry,
     reconcile,

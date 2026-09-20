@@ -135,6 +135,30 @@ describe('Phase 2 resolver', () => {
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
+  it('removes only the caller membership when leaving a clan', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    ddbMock.on(GetCommand).callsFake((input) => {
+      if (input.Key?.SK === 'META') {
+        return { Item: activeClan(now) };
+      }
+      if (input.Key?.SK === 'MEMBER#session-1') {
+        return { Item: member(now) };
+      }
+      return { Item: undefined };
+    });
+    ddbMock.on(TransactWriteCommand).resolves({});
+
+    await expect(handler(event('leaveClan', { clanId: 'clan-1' }))).resolves.toBe(true);
+
+    const calls = ddbMock.commandCalls(TransactWriteCommand);
+    expect(calls).toHaveLength(1);
+    const items = calls[0]!.args[0].input.TransactItems;
+    expect(items).toHaveLength(2);
+    expect(items?.[0]?.ConditionCheck?.Key).toEqual({ PK: 'CLAN#clan-1', SK: 'META' });
+    expect(items?.[1]?.Delete?.Key).toEqual({ PK: 'CLAN#clan-1', SK: 'MEMBER#session-1' });
+    expect(items?.[1]?.Delete?.ConditionExpression).toContain('sessionId = :sessionId');
+  });
+
   it('denies a subscription when the caller is not a member', async () => {
     const now = Math.floor(Date.now() / 1000);
     ddbMock.on(GetCommand).callsFake((input) => {

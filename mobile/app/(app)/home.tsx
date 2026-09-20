@@ -2,6 +2,7 @@ import { useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -36,6 +37,8 @@ export default function HomeScreen() {
   const [nearbyOrigin, setNearbyOrigin] = useState<Coordinates | null>(null);
   const [nearbyLoaded, setNearbyLoaded] = useState(false);
   const [locationNote, setLocationNote] = useState<string | null>(null);
+
+  const locationRecoveryAvailable = Boolean(error && /location|permission|gps/i.test(error));
 
   const openClan = (clanId: string) => {
     router.push({ pathname: '/clan/[clanId]', params: { clanId } });
@@ -199,6 +202,15 @@ export default function HomeScreen() {
         {error ? (
           <View style={styles.errorBox}>
             <Text style={styles.errorText}>{error}</Text>
+            {locationRecoveryAvailable ? (
+              <Pressable
+                accessibilityRole="button"
+                style={styles.settingsButton}
+                onPress={() => void Linking.openSettings()}
+              >
+                <Text style={styles.settingsButtonText}>Open device settings</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
 
@@ -398,7 +410,7 @@ const styles = StyleSheet.create({
   buttonText: { color: '#FFF', fontSize: 16, fontWeight: '700' },
   compactButton: {
     minWidth: 72,
-    minHeight: 40,
+    minHeight: 44,
     borderRadius: 10,
     backgroundColor: '#111',
     alignItems: 'center',
@@ -408,7 +420,7 @@ const styles = StyleSheet.create({
   compactButtonText: { color: '#FFF', fontWeight: '700' },
   joinSmallButton: {
     minWidth: 64,
-    minHeight: 38,
+    minHeight: 44,
     borderRadius: 10,
     backgroundColor: '#111',
     alignItems: 'center',
@@ -427,8 +439,10 @@ const styles = StyleSheet.create({
   },
   secondaryButtonText: { color: '#111', fontSize: 16, fontWeight: '700' },
   buttonDisabled: { opacity: 0.55 },
-  errorBox: { backgroundColor: '#FDECEC', borderRadius: 12, padding: 12 },
+  errorBox: { backgroundColor: '#FDECEC', borderRadius: 12, padding: 12, gap: 8 },
   errorText: { color: '#9F1D1D', lineHeight: 19 },
+  settingsButton: { minHeight: 44, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 2 },
+  settingsButtonText: { color: '#7A1717', fontWeight: '700' },
   noteBox: { backgroundColor: '#FFF7DE', borderRadius: 12, padding: 12 },
   noteText: { color: '#6D5515', lineHeight: 19 },
 });

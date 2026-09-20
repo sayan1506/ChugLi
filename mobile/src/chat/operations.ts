@@ -81,6 +81,12 @@ export const MUTE_MEMBER_MUTATION = gql`
   }
 `;
 
+export const LEAVE_CLAN_MUTATION = gql`
+  mutation LeaveClan($clanId: ID!) {
+    leaveClan(clanId: $clanId)
+  }
+`;
+
 export const ON_CLAN_EVENT_SUBSCRIPTION = gql`
   subscription OnClanEvent($clanId: ID!) {
     onClanEvent(clanId: $clanId) {

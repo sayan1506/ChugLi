@@ -1,195 +1,72 @@
-import { StyleSheet, View, Text, Button, ActivityIndicator, ScrollView, SafeAreaView } from 'react-native';
+import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 import { useAuth } from '@/auth/AuthContext';
 
 export default function SessionScreen() {
-  const { session, state, error, startSession, clearError } = useAuth();
-
-  const formatTimestamp = (ts: number) => new Date(ts * 1000).toISOString();
-  const formatExpiry = (expiresAt: number, serverNow: number) => {
-    const remaining = expiresAt - serverNow;
-    const hours = Math.floor(remaining / 3600);
-    const minutes = Math.floor((remaining % 3600) / 60);
-    const seconds = remaining % 60;
-    return `${hours}h ${minutes}m ${seconds}s`;
-  };
+  const { state, error, startSession, clearError } = useAuth();
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.content}>
-        <View style={styles.header}>
+      <View style={styles.content}>
+        <View style={styles.brand}>
           <Text style={styles.title}>ChugLi</Text>
-          <Text style={styles.subtitle}>Guest Session</Text>
+          <Text style={styles.subtitle}>Nearby conversations that disappear after an hour.</Text>
         </View>
 
         <View style={styles.card}>
-          {state === 'loading' && (
-            <View style={styles.loading}>
-              <ActivityIndicator size="large" color="#0A0A0A" />
-              <Text style={styles.loadingText}>Starting session…</Text>
-            </View>
-          )}
+          <Text style={styles.cardTitle}>Continue as a guest</Text>
+          <Text style={styles.body}>
+            No account or phone number is required. ChugLi creates a temporary guest session so you can discover and join nearby clans.
+          </Text>
 
-          {state === 'error' && (
-            <View style={styles.error}>
-              <Text style={styles.errorText}>Error: {error}</Text>
-              <View style={styles.errorButton}>
-                <Button title="Retry" onPress={() => { clearError(); startSession(); }} />
-              </View>
+          {state === 'loading' ? (
+            <View style={styles.statusRow}>
+              <ActivityIndicator size="small" />
+              <Text style={styles.statusText}>Starting your guest session…</Text>
             </View>
-          )}
+          ) : null}
 
-          {state === 'success' && session && (
-            <View style={styles.success}>
-              <Text style={styles.successLabel}>Session Active</Text>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Session ID</Text>
-                <Text style={styles.detailValue}>{session.sessionId}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Server Time</Text>
-                <Text style={styles.detailValue}>{formatTimestamp(session.serverNow)}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Expires At</Text>
-                <Text style={styles.detailValue}>{formatTimestamp(session.expiresAt)}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Time Remaining</Text>
-                <Text style={styles.detailValue}>{formatExpiry(session.expiresAt, session.serverNow)}</Text>
-              </View>
-              <View style={styles.restartButton}>
-                <Button title="Restart Session" onPress={startSession} />
-              </View>
+          {state === 'error' ? (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>{error ?? 'Could not start your guest session.'}</Text>
             </View>
-          )}
+          ) : null}
 
-          {state === 'idle' && (
-            <View style={styles.idle}>
-              <Text style={styles.idleText}>No active session</Text>
-              <View style={styles.idleButton}>
-                <Button title="Start Guest Session" onPress={startSession} />
-              </View>
-            </View>
-          )}
+          <Pressable
+            accessibilityRole="button"
+            style={[styles.primaryButton, state === 'loading' ? styles.disabled : null]}
+            disabled={state === 'loading'}
+            onPress={() => {
+              clearError();
+              void startSession();
+            }}
+          >
+            <Text style={styles.primaryButtonText}>{state === 'error' ? 'Try again' : 'Enter ChugLi'}</Text>
+          </Pressable>
+
+          <Text style={styles.privacy}>
+            Location is requested only when you discover, create, or join a clan. Your exact coordinates are not shown to other members.
+          </Text>
         </View>
-
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>Phase 1 — Native Foundation</Text>
-        </View>
-      </ScrollView>
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F5F5F5',
-  },
-  content: {
-    flexGrow: 1,
-    padding: 24,
-    paddingBottom: 40,
-    justifyContent: 'center',
-  },
-  header: {
-    alignItems: 'center',
-    marginBottom: 32,
-  },
-  title: {
-    fontSize: 42,
-    fontWeight: '700',
-    color: '#0A0A0A',
-    letterSpacing: -1,
-  },
-  subtitle: {
-    fontSize: 16,
-    color: '#666',
-    marginTop: 4,
-  },
-  card: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  loading: {
-    alignItems: 'center',
-    padding: 16,
-  },
-  loadingText: {
-    marginTop: 12,
-    fontSize: 16,
-    color: '#666',
-  },
-  error: {
-    alignItems: 'center',
-    padding: 16,
-  },
-  errorText: {
-    color: '#C62828',
-    fontSize: 16,
-    marginBottom: 16,
-    textAlign: 'center',
-  },
-  success: {
-    alignItems: 'stretch',
-  },
-  successLabel: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#2E7D32',
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  detailRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#EEE',
-  },
-  detailLabel: {
-    fontSize: 14,
-    color: '#666',
-  },
-  detailValue: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#0A0A0A',
-    fontFamily: 'monospace',
-    textAlign: 'right',
-    flex: 1,
-    marginLeft: 16,
-  },
-  restartButton: {
-    marginTop: 20,
-  },
-  idle: {
-    alignItems: 'center',
-    padding: 16,
-  },
-  idleText: {
-    fontSize: 16,
-    color: '#666',
-    marginBottom: 16,
-  },
-  idleButton: {
-    marginTop: 16,
-  },
-  footer: {
-    alignItems: 'center',
-    paddingTop: 24,
-  },
-  footerText: {
-    fontSize: 12,
-    color: '#999',
-  },
-  errorButton: {
-    marginTop: 16,
-  },
+  container: { flex: 1, backgroundColor: '#F5F5F5' },
+  content: { flex: 1, justifyContent: 'center', padding: 24, gap: 28 },
+  brand: { gap: 8 },
+  title: { fontSize: 44, fontWeight: '800', color: '#0A0A0A', letterSpacing: -1.5 },
+  subtitle: { fontSize: 17, color: '#5F6368', lineHeight: 24, maxWidth: 360 },
+  card: { backgroundColor: '#FFF', borderRadius: 20, padding: 22, gap: 16, elevation: 2 },
+  cardTitle: { fontSize: 22, fontWeight: '700', color: '#151515' },
+  body: { color: '#5F6368', fontSize: 15, lineHeight: 22 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44 },
+  statusText: { color: '#555', flex: 1 },
+  errorBox: { backgroundColor: '#FDECEC', padding: 12, borderRadius: 12 },
+  errorText: { color: '#9F1D1D', lineHeight: 20 },
+  primaryButton: { minHeight: 50, borderRadius: 14, backgroundColor: '#111', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 18 },
+  primaryButtonText: { color: '#FFF', fontSize: 16, fontWeight: '700' },
+  disabled: { opacity: 0.55 },
+  privacy: { color: '#777', fontSize: 12, lineHeight: 18 },
 });

@@ -119,6 +119,7 @@ type Mutation {
   retryMessageReview(clanId: ID!, messageId: ID!): ModerationResult!
   reportMessage(clanId: ID!, messageId: ID!, reason: ReportReason!): ModerationResult!
   muteMember(clanId: ID!, memberId: ID!): MuteResult!
+  leaveClan(clanId: ID!): Boolean!
   publishClanEvent(event: ClanEventInput!): ClanEvent!
 }
 

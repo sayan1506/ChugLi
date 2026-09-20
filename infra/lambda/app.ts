@@ -659,6 +659,51 @@ function decodeNearbyToken(
   }
 }
 
+async function leaveClan(event: ResolverEvent, now: number) {
+  const caller = await requireSession(event, now);
+  const clanId = requireClanId(event.arguments.clanId);
+
+  // Read first so leaving follows the same active-clan/membership boundary as
+  // every other protected clan operation. The transaction then re-checks both
+  // records to prevent a race with expiry or another leave.
+  await requireMembership(clanId, caller.sessionId, now);
+
+  try {
+    await doc.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: tableName(),
+              Key: { PK: clanPk(clanId), SK: 'META' },
+              ConditionExpression: 'expiresAt > :now',
+              ExpressionAttributeValues: { ':now': now },
+            },
+          },
+          {
+            Delete: {
+              TableName: tableName(),
+              Key: { PK: clanPk(clanId), SK: memberSk(caller.sessionId) },
+              ConditionExpression: 'sessionId = :sessionId AND expiresAt > :now',
+              ExpressionAttributeValues: {
+                ':sessionId': caller.sessionId,
+                ':now': now,
+              },
+            },
+          },
+        ],
+      }),
+    );
+  } catch (err) {
+    if (isTransactionFailure(err)) {
+      throw new Error('Membership required');
+    }
+    throw err;
+  }
+
+  return true;
+}
+
 function publicNearbyClan(clan: ClanItem, distanceMeters: number) {
   return {
     clanId: clan.clanId,
@@ -1641,6 +1686,8 @@ export async function handler(event: ResolverEvent): Promise<unknown> {
         return await reportMessage(event, now);
       case 'muteMember':
         return await muteMember(event, now);
+      case 'leaveClan':
+        return await leaveClan(event, now);
       case 'onClanEvent':
         return await authorizeSubscription(event, now);
       default:
